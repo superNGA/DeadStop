@@ -34,8 +34,9 @@ void Decoder_t::Decode(std::vector<Byte>& vecOpCodes, std::vector<Decoder::Inst:
     vecOutput.clear();
     DecoderSearchState_t iSearchState = DecoderSearchState_t::DecoderSearchState_Invalid;
 
-    // Itearting bytes and determining wtf they are.
+
     for(Byte byte : vecOpCodes)
     {
+            
     }
 }

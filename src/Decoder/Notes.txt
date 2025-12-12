@@ -1,0 +1,43 @@
+Max instruction size is 15 bytes.
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+REX prefix are a set of 16 instructions, ranging from 0x40 to 0x4f. 
+REX must preseed the Op code of the escape code ( 0x0f ).
+If the op code has a mandatory prefix, REX must be placed between the mandatory prefix and the opcode / escape op code ( 0x0f )
+    so its preseeds the opcode / escape opcode ( 0x0f )
+In case the REX prefix byte is deemed invalid, it is ignored.
+In IA-32 mode, REX codes ( 0x40 - 0x4F ) represent valid opcodes, but in IA-64, 64 bit mode, they don't.
+
+REX structure : 
+    7 6 5 4 3 2 1 0
+    ~ ~ ~ ~ W R X B
+    NOTE : Refer table 2-4, page 617 for more information
+
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+Many instructions refer to an operand in memory, they have a addresing form specifier byte called Mod R/M byte.
+ModR/M can form a total of 32 different valid values. 
+
+Mod R/M structures:
+    00   000  000
+    MOD  REG  R/M
+
+
+OpCode dictates the use for REG & R/M bits.
+ModR/M dictates the presence of the SID byte.
+
+MOD -> 00 R/M -> 101  == RIP + Disp32
+
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+SIB
+
+SIB bytes strucutre:
+    ss    xxx   bbb
+    scale index base
