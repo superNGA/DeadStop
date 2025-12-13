@@ -6,6 +6,7 @@
 //
 // purpose : Holds a Look Up Table from 0x00 to 0xff, to check byte type in O(1) time.
 //-------------------------------------------------------------------------
+#pragma once
 #include <cstdint>
 #include "../../DecoderDefs/OpCode_t.h"
 
@@ -35,7 +36,13 @@ enum InstTypes_t : uint16_t
 class InstructionType_t
 {
 public:
-    void Initialize();
+    bool Initialize();
+
+    bool IsLegacyPrefix(Byte iOpCode);
+    bool IsREX         (Byte iOpCode);
+    bool IsOpCode      (Byte iOpCode);
+
+    Decoder::Inst::OpCode_t* GetOpCode(Byte iOpCode);
 
 private:
     bool _InitInstTypeLUT();
@@ -48,6 +55,7 @@ private:
     bool m_bOneByteOpCodeLUTInit = false;
     Decoder::Inst::OpCode_t m_oneByteOpCodeLUT[0x100];
 };
+inline InstructionType_t g_instTypeHandler;
 ///////////////////////////////////////////////////////////////////////////
 
 

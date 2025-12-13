@@ -8,13 +8,14 @@
 //-------------------------------------------------------------------------
 #include "InstructionType.h"
 
+#include <cassert>
 #include <string.h>
 
 
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
-void Decoder::InstructionType_t::Initialize()
+bool Decoder::InstructionType_t::Initialize()
 {
     if(m_bInstTypeLUTInit == false)
     {
@@ -26,6 +27,58 @@ void Decoder::InstructionType_t::Initialize()
     {
         m_bOneByteOpCodeLUTInit = _InitOneByteOpCodeLUT();
     }
+
+    return true;
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+bool Decoder::InstructionType_t::IsLegacyPrefix(Byte iOpCode)
+{
+    assert(m_bInstTypeLUTInit == true && "Instruction Type Handler hasn't initialize yet.!!!");
+
+    return m_instTypeLUT[iOpCode] & (
+            InstTypes_t::InstTypes_LegacyPrefixGrp1 | 
+            InstTypes_t::InstTypes_LegacyPrefixGrp2 | 
+            InstTypes_t::InstTypes_LegacyPrefixGrp3 | 
+            InstTypes_t::InstTypes_LegacyPrefixGrp4);
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+bool Decoder::InstructionType_t::IsREX(Byte iOpCode)
+{
+    assert(m_bInstTypeLUTInit == true && "Instruction Type Handler hasn't initialize yet.!!!");
+
+    return m_instTypeLUT[iOpCode] & InstTypes_t::InstTypes_REX;
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+bool Decoder::InstructionType_t::IsOpCode(Byte iOpCode)
+{
+    assert(m_bInstTypeLUTInit == true && "Instruction Type Handler hasn't initialize yet.!!!");
+
+    return m_instTypeLUT[iOpCode] & InstTypes_t::InstTypes_OpCode;
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+Decoder::Inst::OpCode_t* Decoder::InstructionType_t::GetOpCode(Byte iOpCode)
+{
+    assert(m_bInstTypeLUTInit      == true && "Instruction Type Handler hasn't initialize yet.!!!");
+    assert(m_bOneByteOpCodeLUTInit == true && "Instruction Type Handler hasn't initialize yet.!!!");
+
+    bool bIsValidOpCode = m_instTypeLUT[iOpCode] & InstTypes_t::InstTypes_OpCode;
+
+    if(bIsValidOpCode == false)
+        return nullptr;
+
+    return &m_oneByteOpCodeLUT[iOpCode];
 }
 
 

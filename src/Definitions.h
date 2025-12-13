@@ -6,6 +6,7 @@
 //
 // purpose : Contains basic data strucutes / types / alias to be used globally.
 //-------------------------------------------------------------------------
+#pragma once
 #include <cstdint>
 
 typedef unsigned char Byte;

@@ -7,11 +7,18 @@
 // purpose : Logs crashes / exceptions :)
 //-------------------------------------------------------------------------
 #include "DeadStop.h"
+#include "Decoder/DecoderHelper/InstructionType/InstructionType.h"
 
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
-void DeadStop::Initialize()
+bool DeadStop::Initialize()
 {
+    if(Decoder::g_instTypeHandler.Initialize() == false)
+    {
+        return false;
+    }
 
+
+    return true;
 }

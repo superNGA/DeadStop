@@ -6,6 +6,7 @@
 //
 // purpose : Holds upto 3 OpCodes
 //-------------------------------------------------------------------------
+#pragma once
 #include "../../Definitions.h"
 #include <system_error>
 #include <utility>
@@ -158,6 +159,8 @@ struct OpCode_t
     {}
 
 
+    ///////////////////////////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////////////////////////////
     void operator=(const OpCode_t& other)
     {
         m_szOperation                   = other.m_szOperation;
@@ -168,6 +171,21 @@ struct OpCode_t
         m_iOperandLeftType              = other.m_iOperandLeftType;
         m_iOperandRightAddressingMethod = other.m_iOperandRightAddressingMethod;
         m_iOperandRightType             = other.m_iOperandRightType;
+    }
+
+
+    ///////////////////////////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////////////////////////////
+    inline void Clear()
+    {
+        m_szOperation                   = nullptr;
+        m_nOperands                     = 0;
+        m_iByte                         = 0; // 00h is a valid opcode, so this doesn't help at all in clearing.
+        m_iOpCodeSuperScript            = OpCodeSuperScripts_None;
+        m_iOperandLeftAddressingMethod  = OpCodeAddresingMethod_t::OpCodeAddresingMethod_Invalid;
+        m_iOperandLeftType              = OpCodeOperandType_t::OpCodeOperandType_Invalid;
+        m_iOperandRightAddressingMethod = OpCodeAddresingMethod_t::OpCodeAddresingMethod_Invalid;
+        m_iOperandRightType             = OpCodeOperandType_t::OpCodeOperandType_Invalid;
     }
 
 

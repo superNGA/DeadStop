@@ -2,6 +2,7 @@
 #include <iostream>
 #include <winnt.h>
 #include <ntstatus.h>
+#include "DeadStop.h"
 
 
 ///////////////////////////////////////////////////////////////////////////
@@ -39,8 +40,14 @@ void BadFn()
 ///////////////////////////////////////////////////////////////////////////
 int main(void)
 {
-    Init();
+    if(DeadStop::Initialize() == false)
+    {
+        printf("Failed to initialize DeadStop!\n");
+        return 0;
+    }
 
+    
+    Init();
     BadFn();
 
     return 0;

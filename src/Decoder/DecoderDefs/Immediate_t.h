@@ -6,6 +6,8 @@
 //
 // purpose : Holds Immediate bytes
 //-------------------------------------------------------------------------
+#pragma once
+#include <cstdint>
 
 
 ///////////////////////////////////////////////////////////////////////////
@@ -14,7 +16,24 @@ namespace Decoder::Inst
 
 struct Immediate_t
 {
+    Immediate_t()
+    {
+        m_iImmediate      = 0LLU;
+        m_iImmediateBytes = 0;
+    }
 
+
+    ///////////////////////////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////////////////////////////
+    inline void Clear()
+    {
+        m_iImmediate      = 0LLU;
+        m_iImmediateBytes = 0;
+    }
+
+
+    size_t  m_iImmediate      = 0LLU;
+    int32_t m_iImmediateBytes = 0;
 };
 
 }

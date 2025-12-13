@@ -6,6 +6,7 @@
 //
 // purpose : Convert bytes to amd64 assembly
 //-------------------------------------------------------------------------
+#pragma once
 #include <vector>
 #include <cstdint>
 #include "../Definitions.h"

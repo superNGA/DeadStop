@@ -6,6 +6,7 @@
 //
 // purpose : Holds displacment bytes ( upto 4 )
 //-------------------------------------------------------------------------
+#pragma once
 
 
 ///////////////////////////////////////////////////////////////////////////
@@ -14,7 +15,21 @@ namespace Decoder::Inst
 
 struct Displacement_t
 {
+    Displacement_t()
+    {
+        m_iDisplacement = 0LLU;
+    }
+    
 
+    ///////////////////////////////////////////////////////////////////////////
+    ///////////////////////////////////////////////////////////////////////////
+    inline void Clear()
+    {
+        m_iDisplacement = 0LLU;
+    }
+
+
+    size_t m_iDisplacement = 0LLU;
 };
 
 }
