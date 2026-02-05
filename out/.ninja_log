@@ -1,0 +1,22 @@
+# ninja log v7
+29	597	7919875195467043	CMakeFiles/DeadStop.dir/src/DeadStop.cpp.obj	598ad46df4f60e6a
+25	1938	7919875195467043	CMakeFiles/DeadStop.dir/src/Util/Terminal/ConsoleSystem.cpp.obj	3e9bde5cfad521b9
+33	1974	7919875195547070	CMakeFiles/DeadStop.dir/main.cpp.obj	42b2430863fc2d06
+1975	2098	7919875214952529	DeadStop.exe	d0e10a86e3e6000e
+22	683	7919875970565740	CMakeFiles/DeadStop.dir/main.cpp.obj	42b2430863fc2d06
+684	804	7919875977249370	DeadStop.exe	d0e10a86e3e6000e
+23	632	7919878432783245	CMakeFiles/DeadStop.dir/main.cpp.obj	42b2430863fc2d06
+633	743	7919878438765803	DeadStop.exe	d0e10a86e3e6000e
+22	440	7919880719169911	CMakeFiles/DeadStop.dir/src/DeadStop.cpp.obj	598ad46df4f60e6a
+440	553	7919880723286498	DeadStop.exe	d0e10a86e3e6000e
+22	436	7919881321027058	CMakeFiles/DeadStop.dir/src/DeadStop.cpp.obj	598ad46df4f60e6a
+437	549	7919881325157032	DeadStop.exe	d0e10a86e3e6000e
+6	422	7919881705793405	CMakeFiles/DeadStop.dir/src/DeadStop.cpp.obj	598ad46df4f60e6a
+423	532	7919881710069744	DeadStop.exe	d0e10a86e3e6000e
+23	440	7919882444004332	CMakeFiles/DeadStop.dir/src/DeadStop.cpp.obj	598ad46df4f60e6a
+440	550	7919882448137174	DeadStop.exe	d0e10a86e3e6000e
+24	440	7919882663836320	CMakeFiles/DeadStop.dir/src/DeadStop.cpp.obj	598ad46df4f60e6a
+441	550	7919882667989124	DeadStop.exe	d0e10a86e3e6000e
+22	454	7919883996638771	CMakeFiles/DeadStop.dir/src/DeadStop.cpp.obj	598ad46df4f60e6a
+27	650	7919883996735149	CMakeFiles/DeadStop.dir/main.cpp.obj	42b2430863fc2d06
+650	761	7919884002828803	DeadStop.exe	d0e10a86e3e6000e

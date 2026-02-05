@@ -2,20 +2,35 @@ cmake_minimum_required(VERSION 3.20)
 
 project(DeadStop LANGUAGES CXX)
 
+message(STATUS "C compiler:       ${CMAKE_C_COMPILER}")
+message(STATUS "C++ compiler:     ${CMAKE_CXX_COMPILER}")
+message(STATUS "Compiler ID:      ${CMAKE_CXX_COMPILER_ID}")
+message(STATUS "Compiler version: ${CMAKE_CXX_COMPILER_VERSION}")
+
 # C++ standard
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD          17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-
-# Needed for compile_commands.json
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_CXX_EXTENSIONS        OFF)
 
 
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_executable(DeadStop
 
-file(GLOB_RECURSE SRC_FILES
-    CONFIGURE_DEPENDS
-    src/*.cpp
+# Include
+"Include/Alias.h"
+"Include/DeadStop.h"
+
+# Util
+"src/Util/Terminal/Terminal.h"
+"src/Util/Terminal/ConsoleSystem.h"
+"src/Util/Terminal/ConsoleSystem.cpp"
+
+# src
+"src/DeadStop.cpp"
+
+# Example ( main.cpp )
+"main.cpp"
+
 )
-    
-add_executable(main ${SRC_FILES})
+
+
+target_compile_features(DeadStop PRIVATE cxx_std_17)

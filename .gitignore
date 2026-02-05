@@ -1,5 +1,2 @@
 *.i64
-build/
-.cache/
-.vs/
-
+out/

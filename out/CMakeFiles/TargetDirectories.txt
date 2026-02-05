@@ -1,0 +1,3 @@
+D:/Repos/DeadStop/out/CMakeFiles/DeadStop.dir
+D:/Repos/DeadStop/out/CMakeFiles/edit_cache.dir
+D:/Repos/DeadStop/out/CMakeFiles/rebuild_cache.dir
