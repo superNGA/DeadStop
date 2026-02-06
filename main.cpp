@@ -24,6 +24,7 @@ int main(void)
     std::cout << "Deadstop initialized successfully\n";
 
 
+    // This will crash.
     BadFunction();
 
 

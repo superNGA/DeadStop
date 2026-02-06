@@ -8,8 +8,9 @@
 //-------------------------------------------------------------------------
 #pragma once
 #include "../Include/Alias.h"
-#include <string>
 #include "../Include/DeadStop.h"
+#include <string>
+#include <signal.h>
 
 
 
@@ -23,6 +24,7 @@ namespace DEADSTOP_NAMESPACE
             // Singleton instance getter.
             static DeadStop_t& GetInstance() { static DeadStop_t instance; return instance; }
 
+
             ErrCodes_t Initialize(const char* m_szDumpFilePath);
             ErrCodes_t Uninitialize();
 
@@ -34,5 +36,7 @@ namespace DEADSTOP_NAMESPACE
 
             bool        m_bInitialized = false;
             std::string m_szDumpFilePath;
+
+            struct sigaction m_sigAction;
     };
 }

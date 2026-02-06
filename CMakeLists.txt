@@ -23,9 +23,12 @@ add_executable(DeadStop
 "src/Util/Terminal/Terminal.h"
 "src/Util/Terminal/ConsoleSystem.h"
 "src/Util/Terminal/ConsoleSystem.cpp"
+"src/Util/Assertion/Assertion.h"
 
 # src
 "src/DeadStop.cpp"
+"src/DeadStopImpl.h"
+"src/DeadStopImpl.cpp"
 
 # Example ( main.cpp )
 "main.cpp"

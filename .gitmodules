@@ -1,0 +1,3 @@
+[submodule "lib/IDASM"]
+	path = lib/IDASM
+	url = https://github.com/superNGA/INSANE_DisassemblerAMD64.git
