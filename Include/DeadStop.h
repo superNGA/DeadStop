@@ -17,6 +17,7 @@ namespace DEADSTOP_NAMESPACE
         ErrCode_Invalid = -1,
         ErrCode_Success = 0,
         ErrCode_FailedInit,
+        ErrCode_FailedToStartSubModules,
 
         ErrCode_Count
     };

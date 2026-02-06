@@ -7,6 +7,8 @@ message(STATUS "C++ compiler:     ${CMAKE_CXX_COMPILER}")
 message(STATUS "Compiler ID:      ${CMAKE_CXX_COMPILER_ID}")
 message(STATUS "Compiler version: ${CMAKE_CXX_COMPILER_VERSION}")
 
+add_subdirectory(lib/IDASM)
+
 # C++ standard
 set(CMAKE_CXX_STANDARD          17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -30,10 +32,15 @@ add_executable(DeadStop
 "src/DeadStopImpl.h"
 "src/DeadStopImpl.cpp"
 
+# SignalHandler
+"src/SignalHandler/SignalHandler.h"
+"src/SignalHandler/SignalHandler.cpp"
+
 # Example ( main.cpp )
 "main.cpp"
 
 )
 
+target_link_libraries(DeadStop PRIVATE INSANE_DisassemblerAMD64)
 
 target_compile_features(DeadStop PRIVATE cxx_std_17)

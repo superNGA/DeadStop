@@ -6,7 +6,7 @@
 // A bad funtion that will crash...
 static void BadFunction()
 {
-    int* pA = nullptr;
+    int* pA = reinterpret_cast<int*>(0xCDCDCDCDCDCDCDCD);
     *pA = 500;
 }
 
