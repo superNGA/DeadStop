@@ -7,6 +7,11 @@
 // purpose : Handler roughly all common signals received from OS.
 //-------------------------------------------------------------------------
 #include "SignalHandler.h"
+#include <cstring>
+#include <iomanip>
+#include <iostream>
+#include <fstream>
+#include "../DeadStopImpl.h"
 
 // Disassembler.
 #include "../../lib/IDASM/Include/INSANE_DisassemblerAMD64.h"
@@ -26,20 +31,17 @@ using namespace DeadStop;
 ///////////////////////////////////////////////////////////////////////////
 namespace DEADSTOP_NAMESPACE
 {
-    static void SignalHandler_SIGINT (int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext);
-    static void SignalHandler_SIGILL (int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext);
-    static void SignalHandler_SIGABRT(int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext);
-    static void SignalHandler_SIGFPE (int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext);
-    static void SignalHandler_SIGSEGV(int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext);
-    static void SignalHandler_SIGTERM(int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext);
-    static void SignalHandler_SIGHUP (int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext);
-    static void SignalHandler_SIGQUIT(int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext);
-    static void SignalHandler_SIGTRAP(int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext);
-    static void SignalHandler_SIGKILL(int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext);
-    static void SignalHandler_SIGPIPE(int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext);
-    static void SignalHandler_SIGALRM(int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext);
-}
+    static void SignalHandler_SIGILL (std::fstream& hFile, int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext);
+    static void SignalHandler_SIGTRAP(std::fstream& hFile, int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext);
+    static void SignalHandler_SIGABRT(std::fstream& hFile, int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext);
+    static void SignalHandler_SIGFPE (std::fstream& hFile, int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext);
+    static void SignalHandler_SIGBUS (std::fstream& hFile, int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext);
+    static void SignalHandler_SIGSEGV(std::fstream& hFile, int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext);
 
+
+    // Write-to-file fns...
+    static void DumpGeneralRegisters(std::fstream& hFile, ucontext_t* pContext);
+}
 
 
 
@@ -47,55 +49,59 @@ namespace DEADSTOP_NAMESPACE
 ///////////////////////////////////////////////////////////////////////////
 void DeadStop::MasterSignalHandler(int iSignalID, siginfo_t* pSigInfo, void* pContext)
 {
-    ucontext_t* pUContext = reinterpret_cast<ucontext_t*>(pContext);
+    // Is initialized?
+    if(DeadStop_t::GetInstance().IsInitialized() == false)
+        return; 
 
+
+    std::fstream hFile(DeadStop_t::GetInstance().GetDumpFilePath(), std::ios::app);
+
+    // Failed to open file?
+    if(hFile.is_open() == false)
+        return;
+
+
+    ucontext_t* pUContext = reinterpret_cast<ucontext_t*>(pContext);
     switch(iSignalID)
     {
-        case SIGINT:  SignalHandler_SIGINT (iSignalID, pSigInfo, pUContext); break;
-        case SIGILL:  SignalHandler_SIGILL (iSignalID, pSigInfo, pUContext); break;
-        case SIGABRT: SignalHandler_SIGABRT(iSignalID, pSigInfo, pUContext); break;
-        case SIGFPE:  SignalHandler_SIGFPE (iSignalID, pSigInfo, pUContext); break;
-        case SIGSEGV: SignalHandler_SIGSEGV(iSignalID, pSigInfo, pUContext); break; 
-        case SIGTERM: SignalHandler_SIGTERM(iSignalID, pSigInfo, pUContext); break;
-        case SIGHUP:  SignalHandler_SIGHUP (iSignalID, pSigInfo, pUContext); break;
-        case SIGQUIT: SignalHandler_SIGQUIT(iSignalID, pSigInfo, pUContext); break;
-        case SIGTRAP: SignalHandler_SIGTRAP(iSignalID, pSigInfo, pUContext); break;
-        case SIGKILL: SignalHandler_SIGKILL(iSignalID, pSigInfo, pUContext); break;
-        case SIGPIPE: SignalHandler_SIGPIPE(iSignalID, pSigInfo, pUContext); break;
-        case SIGALRM: SignalHandler_SIGALRM(iSignalID, pSigInfo, pUContext); break;
+        case SIGSEGV: SignalHandler_SIGSEGV(hFile, iSignalID, pSigInfo, pUContext); break;
+        case SIGILL:  SignalHandler_SIGILL (hFile, iSignalID, pSigInfo, pUContext); break;
+        case SIGTRAP: SignalHandler_SIGTRAP(hFile, iSignalID, pSigInfo, pUContext); break;
+        case SIGABRT: SignalHandler_SIGABRT(hFile, iSignalID, pSigInfo, pUContext); break;
+        case SIGFPE:  SignalHandler_SIGFPE (hFile, iSignalID, pSigInfo, pUContext); break;
+        case SIGBUS:  SignalHandler_SIGBUS (hFile, iSignalID, pSigInfo, pUContext); break;
 
-        default: return; // What is this signal for?
+        default: assertion(false && "Invalid signal ID"); return;
     }
+
+
+    hFile.close();
+    abort();
 }
 
 
 
-static void DeadStop::SignalHandler_SIGINT (int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext) {return;}
-static void DeadStop::SignalHandler_SIGILL (int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext) {return;}
-static void DeadStop::SignalHandler_SIGABRT(int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext) {return;}
-static void DeadStop::SignalHandler_SIGFPE (int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext) {return;}
+static void DeadStop::SignalHandler_SIGILL (std::fstream& hFile, int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext) {return;}
+static void DeadStop::SignalHandler_SIGTRAP(std::fstream& hFile, int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext) {return;}
+static void DeadStop::SignalHandler_SIGABRT(std::fstream& hFile, int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext) {return;}
+static void DeadStop::SignalHandler_SIGFPE (std::fstream& hFile, int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext) {return;}
+static void DeadStop::SignalHandler_SIGBUS (std::fstream& hFile, int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext) {return;}
 
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
-static void DeadStop::SignalHandler_SIGSEGV(int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext)
+static void DeadStop::SignalHandler_SIGSEGV(std::fstream& hFile, int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext)
 {
-    // Must be only segment fault for now.
-    assertion(iSignalID == SIGSEGV && "Received signal is not for segfault.");
+    assertion(iSignalID == SIGSEGV && "Invalid signal received in SIGSEGV handler");
+
+    hFile << "Signal received [ SIGSEGV ] i.e. segfault\n";
 
 
-    LOG("Signal Index : %d, SigInfo : %p, Context : %p", iSignalID, pSigInfo, pUContext);
+    // Dump all general purpose registers with their values.
+    DumpGeneralRegisters(hFile, pContext);
 
 
-    // What adrs cause segfault.
-    LOG("Faulted 4 adrs : %p", pSigInfo->si_addr);
-    LOG("rip : %p, rsp : %p, rbp : %p", 
-            pUContext->uc_mcontext.gregs[REG_RIP],
-            pUContext->uc_mcontext.gregs[REG_RSP],
-            pUContext->uc_mcontext.gregs[REG_RBP]);
-
-
-    void* pCrashLocation = reinterpret_cast<void*>(pUContext->uc_mcontext.gregs[REG_RIP]);
+    void* pCrashLocation = reinterpret_cast<void*>(pContext->uc_mcontext.gregs[REG_RIP]);
 
 
     // Collecting some bytes from crash location to disassembler.
@@ -131,16 +137,46 @@ static void DeadStop::SignalHandler_SIGSEGV(int iSignalID, siginfo_t* pSigInfo, 
             }
         }
     }
-
-
-    abort();
 }
 
 
-static void DeadStop::SignalHandler_SIGTERM(int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext) {return;}
-static void DeadStop::SignalHandler_SIGHUP (int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext) {return;}
-static void DeadStop::SignalHandler_SIGQUIT(int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext) {return;}
-static void DeadStop::SignalHandler_SIGTRAP(int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext) {return;}
-static void DeadStop::SignalHandler_SIGKILL(int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext) {return;}
-static void DeadStop::SignalHandler_SIGPIPE(int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext) {return;}
-static void DeadStop::SignalHandler_SIGALRM(int iSignalID, siginfo_t* pSigInfo, ucontext_t* pUContext) {return;}
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+static void DeadStop::DumpGeneralRegisters(std::fstream& hFile, ucontext_t* pContext)
+{
+    static const char*  s_szGRegNames[__NGREG] = {
+        "REG_R8", "REG_R9", "REG_R10", "REG_R11", "REG_R12", "REG_R13", "REG_R14", "REG_R15",
+        "REG_RDI", "REG_RSI", "REG_RBP", "REG_RBX", "REG_RDX", "REG_RAX", "REG_RCX", "REG_RSP", "REG_RIP",
+        "REG_EFL", "REG_CSGSFS", "REG_ERR", "REG_TRAPNO", "REG_OLDMASK", "REG_CR2"
+    };
+
+
+    // Longest register name ( used for formatting )
+    size_t iMaxRegNameSize = 0; 
+    for(int iRegIndex = 0; iRegIndex < __NGREG; iRegIndex++) 
+        if(size_t iLen = strlen(s_szGRegNames[iRegIndex]); iLen > iMaxRegNameSize) 
+            iMaxRegNameSize = iLen;
+
+
+    hFile << std::uppercase << std::hex << std::setfill('0');
+
+    hFile << "------------------------------ General Registers------------------------------" << std::endl;
+    for(int iRegIndex = 0; iRegIndex < __NGREG; iRegIndex++)
+    {
+        // This register name's size.
+        size_t iRegNameSize = strlen(s_szGRegNames[iRegIndex]);
+
+        hFile << s_szGRegNames[iRegIndex];
+        for(int i = 0; i < iMaxRegNameSize - iRegNameSize; i++) hFile << ' ';
+        hFile << " : " << 
+            std::setfill('0') << std::setw(16) << pContext->uc_mcontext.gregs[iRegIndex];
+
+        if(pContext->uc_mcontext.gregs[iRegIndex] == 0)
+            hFile << " [ zero ]";
+
+        hFile << std::endl;
+    }
+    hFile << "------------------------------------------------------------------------------" << std::endl;
+
+    hFile << std::nouppercase << std::dec << std::setfill(' ');
+}

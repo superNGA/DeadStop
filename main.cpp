@@ -16,7 +16,7 @@ static void BadFunction()
 ///////////////////////////////////////////////////////////////////////////
 int main(void)
 {
-    if(DeadStop::Initialize("TestDump.txt") != DeadStop::ErrCode_Success)
+    if(DeadStop::Initialize("testdump.txt") != DeadStop::ErrCode_Success)
     {
         std::cout << "Failed to initialize DeadStop.\n";
         return 1;

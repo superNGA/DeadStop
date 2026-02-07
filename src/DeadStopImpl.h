@@ -24,9 +24,11 @@ namespace DEADSTOP_NAMESPACE
             // Singleton instance getter.
             static DeadStop_t& GetInstance() { static DeadStop_t instance; return instance; }
 
-
             ErrCodes_t Initialize(const char* m_szDumpFilePath);
             ErrCodes_t Uninitialize();
+
+            bool IsInitialized() const;
+            const std::string& GetDumpFilePath() const;
 
         private:
             // Singleton.

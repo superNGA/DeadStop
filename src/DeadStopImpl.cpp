@@ -63,7 +63,12 @@ ErrCodes_t DeadStop_t::Initialize(const char* szDumpFilePath)
         m_sigAction.sa_sigaction = MasterSignalHandler;
 
         // Register our handler.
-        sigaction(SIGSEGV, &m_sigAction, nullptr);
+        sigaction(SIGSEGV, &m_sigAction, nullptr); // Segment fault.
+        sigaction(SIGILL,  &m_sigAction, nullptr); // Illegal instruction.
+        sigaction(SIGTRAP, &m_sigAction, nullptr); // breakpoint ( int3 )
+        sigaction(SIGABRT, &m_sigAction, nullptr); // abort() / assertion fail.
+        sigaction(SIGFPE,  &m_sigAction, nullptr); // devide by zero.
+        sigaction(SIGBUS,  &m_sigAction, nullptr); // hardware memory error, bad mmap.
     }
 
 
@@ -81,4 +86,20 @@ ErrCodes_t DeadStop_t::Uninitialize()
 
 
     return ErrCodes_t::ErrCode_Success;
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+bool DeadStop_t::IsInitialized() const
+{
+    return m_bInitialized;
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+const std::string& DeadStop_t::GetDumpFilePath() const
+{
+    return m_szDumpFilePath;
 }
