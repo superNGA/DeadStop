@@ -50,7 +50,11 @@ namespace DEADSTOP_NAMESPACE
 ///////////////////////////////////////////////////////////////////////////
 namespace DEADSTOP_NAMESPACE
 {
-    static void DumpAssembly(std::fstream& hFile, int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext);
+    static bool DumpAssembly(
+            std::fstream& hFile, const std::vector<MemRegion_t>& vecValidMemRegions, 
+            int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext, int iAsmDumpRangeInBytes);
+    static bool GenerateDasmOutput(std::stringstream& ssOut, uintptr_t iStartAdrs, const std::vector<InsaneDASM64::Byte>& vecBytes, uintptr_t pCrashLocation);
+    static bool IsMemoryRegionRedable(const std::vector<MemRegion_t>& vecValidMemRegions, const MemRegion_t& targetRegion);
 
     // Write-to-file fns...
     static void DumpGeneralRegisters(std::fstream& hFile, ucontext_t* pContext);
@@ -118,8 +122,12 @@ void DeadStop::MasterSignalHandler(int iSignalID, siginfo_t* pSigInfo, void* pCo
 
 
     hFile << "\n\n";
-    DumpAssembly(hFile, iSignalID, pSigInfo, pUContext);
-    WIN_LOG("Dumped crash location's assembly.");
+    bool bAsmDumpWin = DumpAssembly(hFile, vecSelfMaps, iSignalID, pSigInfo, pUContext, DeadStop_t::GetInstance().GetAsmDumpRange());
+
+    if(bAsmDumpWin == true)
+        WIN_LOG("Dumped crash location's assembly.");
+    else
+        FAIL_LOG("Failed to dump assembly to crash logs.");
 
 
     hFile.close();
@@ -129,29 +137,121 @@ void DeadStop::MasterSignalHandler(int iSignalID, siginfo_t* pSigInfo, void* pCo
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
-static void DeadStop::DumpAssembly(std::fstream& hFile, int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext)
+static bool DeadStop::DumpAssembly(
+        std::fstream& hFile, const std::vector<MemRegion_t>& vecValidMemRegions, 
+        int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext, int iAsmDumpRangeInBytes)
 {
-    void* pCrashLocation = reinterpret_cast<void*>(pContext->uc_mcontext.gregs[REG_RIP]);
+    uintptr_t pCrashLocation = static_cast<uintptr_t>(pContext->uc_mcontext.gregs[REG_RIP]);
+
+
+    // Does the crash location belong to the process?
+    MemRegion_t memRegionCrashLoc(pCrashLocation - 10, pCrashLocation + 10);
+    if(IsMemoryRegionRedable(vecValidMemRegions, memRegionCrashLoc) == false)
+    {
+        FAIL_LOG("Crash location [ %p ] is not a redable memory location. Cannot dump crash logs.", pCrashLocation);
+        return false;
+    }
+
+    assertion(pCrashLocation > iAsmDumpRangeInBytes && "Invalid dump range or crash location?");
+    assertion(iAsmDumpRangeInBytes < 0x1000 && "Too big dump range");
+    MemRegion_t memDumpRegion(static_cast<intptr_t>(pCrashLocation) - iAsmDumpRangeInBytes, pCrashLocation + iAsmDumpRangeInBytes);
+    if(IsMemoryRegionRedable(vecValidMemRegions, memDumpRegion) == false)
+    {
+        hFile << "Some parts of the dump regions [ " << 
+            std::hex << memDumpRegion.m_iStart << " - " << memDumpRegion.m_iEnd << 
+            " ] can't be read, reducing dump region to 100 byte above & below\n";
+
+        FAIL_LOG("Some parts of the dump regions [ 0x%016llX - 0x%016llX ] can't be read, reducing dump region to 100 byte above & below",
+                memDumpRegion.m_iStart, memDumpRegion.m_iEnd);
+
+
+        // Incase the initial memory region was smaller than 100 bytes and even
+        // that wasn't in the process's memory, then no point in rechecking, something 
+        // is fucked up real bad. Just leave now.
+        if(iAsmDumpRangeInBytes > 100)
+        {
+            memDumpRegion.m_iStart = static_cast<intptr_t>(pCrashLocation) - 100; 
+            memDumpRegion.m_iEnd   = pCrashLocation + 100;
+        }
+        
+
+        // Checking aginst modified region.
+        if(IsMemoryRegionRedable(vecValidMemRegions, memDumpRegion) == false)
+        {
+            hFile << "Dump region's couldn't be read.\n";
+            FAIL_LOG("Dump region's couldn't be read.\n");
+            return false;
+        }
+    }
+
+
+    assertion(iAsmDumpRangeInBytes > 0 && "Invalid Dump Range");
+    const int iAsmDumpRange = iAsmDumpRangeInBytes;
 
 
     // Collecting some bytes from crash location to disassembler.
     std::vector<InsaneDASM64::Byte> vecBytes;
-    for(int i = -50; i < 50; i++)
+    for(int i = -iAsmDumpRange; i < iAsmDumpRange; i++)
         vecBytes.push_back(*(reinterpret_cast<InsaneDASM64::Byte*>(pCrashLocation) + i));
 
 
+    constexpr size_t MAX_DISASSEMBLING_ATTEMPS = 10;
+    std::stringstream ssDasmOutput;
+    bool bDasmSucceded = false;
+    for(int iAttempt = 0; iAttempt < MAX_DISASSEMBLING_ATTEMPS; iAttempt++)
+    {
+        // Address of the first instruction.
+        uintptr_t iStartAdrs = static_cast<uintptr_t>(
+            static_cast<intptr_t>(pCrashLocation) - static_cast<intptr_t>(iAsmDumpRange) + static_cast<intptr_t>(iAttempt));
+
+
+        ssDasmOutput.clear(); ssDasmOutput.str("");
+        if(GenerateDasmOutput(ssDasmOutput, iStartAdrs, vecBytes, pCrashLocation) == true)
+        {
+            WIN_LOG("Disassembly verified.");
+            bDasmSucceded = true;
+            break;
+        }
+
+        // Remove the first element in case we fail.
+        // NOTE : This takes O(n), cause some smart ass nigga decided that std::vector<bytes> is a good way to feed bytes 
+        //        into a disassembler.
+        vecBytes.erase(vecBytes.begin()); 
+
+        FAIL_LOG("Disssembly Failed. Attempt number %d", iAttempt);
+    }
+
+
+    // We failed all disassembling attempts?
+    if(bDasmSucceded == false)
+    {
+        DoBranding(hFile); hFile << "Disasesmlby Failed.\n";
+        return false;
+    }
+
+
+    hFile << ssDasmOutput.str();
+    return true;
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+static bool DeadStop::GenerateDasmOutput(
+        std::stringstream& ssOut, uintptr_t iStartAdrs, const std::vector<InsaneDASM64::Byte>& vecBytes, uintptr_t pCrashLocation)
+{
     // Decoder & Disassembler.
     std::vector<InsaneDASM64::Instruction_t> vecDecodedInst;
     std::vector<InsaneDASM64::DASMInst_t>    vecDisassembledInst; 
-    ArenaAllocator_t allocator(8 * 1024);
+    ArenaAllocator_t allocator(8 * 1024); // 8 KiB arenas.
 
 
     // Decode...
     InsaneDASM64::IDASMErrorCode_t iDecodingErrCode = InsaneDASM64::Decode(vecBytes, vecDecodedInst, allocator);
     if(iDecodingErrCode != InsaneDASM64::IDASMErrorCode_t::IDASMErrorCode_Success)
     {
-        hFile << InsaneDASM64::GetErrorMessage(iDecodingErrCode) << std::endl;
-        return;
+        ssOut << InsaneDASM64::GetErrorMessage(iDecodingErrCode) << std::endl;
+        return false;
     }
     WIN_LOG("Decoding done.");
 
@@ -160,8 +260,8 @@ static void DeadStop::DumpAssembly(std::fstream& hFile, int iSignalID, siginfo_t
     InsaneDASM64::IDASMErrorCode_t iDasmErrCode = InsaneDASM64::Disassemble(vecDecodedInst, vecDisassembledInst);
     if(iDasmErrCode != InsaneDASM64::IDASMErrorCode_t::IDASMErrorCode_Success)
     {
-        hFile << InsaneDASM64::GetErrorMessage(iDasmErrCode) << std::endl;
-        return;
+        ssOut << InsaneDASM64::GetErrorMessage(iDasmErrCode) << std::endl;
+        return false;
     }
     WIN_LOG("Disassembing done.");
 
@@ -169,15 +269,18 @@ static void DeadStop::DumpAssembly(std::fstream& hFile, int iSignalID, siginfo_t
     // Disasesmbled data must be valid.
     if(vecDecodedInst.size() != vecDisassembledInst.size())
     {
-        hFile << "Decoded instructions and disassembled instruction count is not same.";
-        hFile << "Where did you got this dog crap disassembler from?" << std::endl;
-        return;
+        ssOut << "Decoded instructions and disassembled instruction count is not same.";
+        ssOut << "Where did you got this dog crap disassembler from?" << std::endl;
+        return false;
     }
 
 
-    hFile << "------------------------------ Crash Location ------------------------------" << std::endl;
+    ssOut << "------------------------------ Crash Location ------------------------------" << std::endl;
 
     std::stringstream ssTemp;
+    size_t iInstAdrs = iStartAdrs;
+    bool bPasssedCrashLoc = false; // Did we pass by the instruction that caused signal?
+
     for(size_t iInstIndex = 0; iInstIndex < vecDecodedInst.size(); iInstIndex++)
     {
         ssTemp.clear();
@@ -186,6 +289,7 @@ static void DeadStop::DumpAssembly(std::fstream& hFile, int iSignalID, siginfo_t
         InsaneDASM64::Instruction_t* pInst     = &vecDecodedInst[iInstIndex];
         InsaneDASM64::DASMInst_t*    pDasmInst = &vecDisassembledInst[iInstIndex];
 
+        size_t iTotalBytes = 0;
         
         ssTemp << std::uppercase << std::hex << std::setfill('0');
         switch(pInst->m_iInstEncodingType)
@@ -195,32 +299,51 @@ static void DeadStop::DumpAssembly(std::fstream& hFile, int iSignalID, siginfo_t
                     InsaneDASM64::Legacy::LegacyInst_t* pLegacyInst = reinterpret_cast<InsaneDASM64::Legacy::LegacyInst_t*>(pInst->m_pInst);
                     
                     // Legacy prefixies
+                    iTotalBytes += pLegacyInst->m_legacyPrefix.m_nPrefix;
                     for(int iPrefixIndex = 0; iPrefixIndex < pLegacyInst->m_legacyPrefix.m_nPrefix; iPrefixIndex++)
                         ssTemp << std::setw(2) << static_cast<int>(pLegacyInst->m_legacyPrefix.m_legacyPrefix[iPrefixIndex]);
 
+
                     // REX byte
                     if(pLegacyInst->m_bHasREX == true)
+                    {
                         ssTemp << std::setw(2) << static_cast<int>(pLegacyInst->m_iREX);
+                        iTotalBytes++;
+                    }
+
 
                     // OpCodes
                     for(int iOpCodeIndex = 0; iOpCodeIndex < pLegacyInst->m_opCode.m_nOpBytes; iOpCodeIndex++)
                         ssTemp << std::setw(2) << static_cast<int>(pLegacyInst->m_opCode.m_opBytes[iOpCodeIndex]);
+                    iTotalBytes += pLegacyInst->m_opCode.m_nOpBytes;
+
 
                     // ModRm
                     if(pLegacyInst->m_bHasModRM == true)
+                    {
                         ssTemp << std::setw(2) << static_cast<int>(pLegacyInst->m_modrm.Get());
+                        iTotalBytes++;
+                    }
+
 
                     // SIB
                     if(pLegacyInst->m_bHasSIB == true)
+                    {
                         ssTemp << std::setw(2) << static_cast<int>(pLegacyInst->m_SIB.Get());
+                        iTotalBytes++;
+                    }
+
 
                     // Displacement
                     for(int iDispByteIndex = 0; iDispByteIndex < pLegacyInst->m_displacement.ByteCount(); iDispByteIndex++)
                         ssTemp << std::setw(2) << static_cast<int>(pLegacyInst->m_displacement.m_iDispBytes[iDispByteIndex]);
+                    iTotalBytes += pLegacyInst->m_displacement.ByteCount();
+
 
                     // Immediate
                     for(int iImmByteIndex = 0; iImmByteIndex < pLegacyInst->m_immediate.ByteCount(); iImmByteIndex++)
                         ssTemp << std::setw(2) << static_cast<int>(pLegacyInst->m_immediate.m_immediateByte[iImmByteIndex]);
+                    iTotalBytes += pLegacyInst->m_immediate.ByteCount();
                 }
                 break;
 
@@ -230,28 +353,43 @@ static void DeadStop::DumpAssembly(std::fstream& hFile, int iSignalID, siginfo_t
 
                     // VEX prefix
                     ssTemp << std::setw(2) << static_cast<int>(pVEXInst->m_vexPrefix.m_iPrefix);
+                    iTotalBytes++;
 
+                    
                     // VEX bytes
                     for(int iVEXByteIndex = 0; iVEXByteIndex < pVEXInst->m_vexPrefix.m_nVEXBytes; iVEXByteIndex++)
                         ssTemp << std::setw(2) << static_cast<int>(pVEXInst->m_vexPrefix.m_iVEX[iVEXByteIndex]);
+                    iTotalBytes += pVEXInst->m_vexPrefix.m_nVEXBytes;
+
 
                     // OpCode byte.
                     ssTemp << std::setw(2) << static_cast<int>(pVEXInst->m_opcode.GetMostSignificantOpCode());
+                    iTotalBytes++;
+
 
                     // ModRM
                     ssTemp << std::setw(2) << static_cast<int>(pVEXInst->m_modrm.Get());
+                    iTotalBytes++;
+
 
                     // SIB
                     if(pVEXInst->m_bHasSIB == true)
+                    {
                         ssTemp << std::setw(2) << static_cast<int>(pVEXInst->m_SIB.Get());
+                        iTotalBytes++;
+                    }
+
 
                     // Displacement
                     for(int iDispByteIndex = 0; iDispByteIndex < pVEXInst->m_disp.ByteCount(); iDispByteIndex++)
                         ssTemp << std::setw(2) << static_cast<int>(pVEXInst->m_disp.m_iDispBytes[iDispByteIndex]);
+                    iTotalBytes += pVEXInst->m_disp.ByteCount();
+
 
                     // Immediate
                     for(int iImmByteIndex = 0; iImmByteIndex < pVEXInst->m_immediate.ByteCount(); iImmByteIndex++)
                         ssTemp << std::setw(2) << static_cast<int>(pVEXInst->m_immediate.m_immediateByte[iImmByteIndex]);
+                    iTotalBytes += pVEXInst->m_immediate.ByteCount();
                 }
                 break;
 
@@ -261,59 +399,107 @@ static void DeadStop::DumpAssembly(std::fstream& hFile, int iSignalID, siginfo_t
 
                     // EVEX prefix
                     ssTemp << std::setw(2) << static_cast<int>(pEVEXInst->m_evexPrefix.m_iPrefix);
+                    iTotalBytes++;
+
 
                     // EVEX payload
                     ssTemp << std::setw(2) << static_cast<int>(pEVEXInst->m_evexPrefix.m_iPayload1);
                     ssTemp << std::setw(2) << static_cast<int>(pEVEXInst->m_evexPrefix.m_iPayload2);
                     ssTemp << std::setw(2) << static_cast<int>(pEVEXInst->m_evexPrefix.m_iPayload3);
+                    iTotalBytes += 3;
 
 
                     // OpCode byte.
                     ssTemp << std::setw(2) << static_cast<int>(pEVEXInst->m_opcode.GetMostSignificantOpCode());
+                    iTotalBytes++;
+
 
                     // ModRM
                     ssTemp << std::setw(2) << static_cast<int>(pEVEXInst->m_modrm.Get());
+                    iTotalBytes++;
+
 
                     // SIB
                     if(pEVEXInst->m_bHasSIB == true)
+                    {
                         ssTemp << std::setw(2) << static_cast<int>(pEVEXInst->m_SIB.Get());
+                        iTotalBytes++;
+                    }
+
 
                     // Displacement
                     for(int iDispByteIndex = 0; iDispByteIndex < pEVEXInst->m_disp.ByteCount(); iDispByteIndex++)
                         ssTemp << std::setw(2) << static_cast<int>(pEVEXInst->m_disp.m_iDispBytes[iDispByteIndex]);
+                    iTotalBytes += pEVEXInst->m_disp.ByteCount();
+
 
                     // Immediate
                     for(int iImmByteIndex = 0; iImmByteIndex < pEVEXInst->m_immediate.ByteCount(); iImmByteIndex++)
                         ssTemp << std::setw(2) << static_cast<int>(pEVEXInst->m_immediate.m_immediateByte[iImmByteIndex]);
+                    iTotalBytes += pEVEXInst->m_immediate.ByteCount();
                 }
                 break;
 
             default: break;
         }
+
+
+        // if @ crash location, mark it.
+        if(iInstAdrs == pCrashLocation)
+        {
+            bPasssedCrashLoc = true;
+            ssOut << "  <--[ Crashed here ]";
+        }
+        ssOut << '\n'; // This newline character is for the previous line.
+        
         ssTemp << std::nouppercase << std::dec << std::setfill(' ');
-        hFile << std::left << std::setw(32) << ssTemp.str();
+        ssOut << "0x" << std::hex << iInstAdrs << std::dec << "    " << std::left << std::setw(32) << ssTemp.str();
+
+        iInstAdrs += iTotalBytes;
 
 
         switch(pDasmInst->m_nOperands)
         {
-            case 0: hFile << std::setw(10) << pDasmInst->m_szMnemonic; break;
-            case 1: hFile << std::setw(10) << pDasmInst->m_szMnemonic << ' ' << pDasmInst->m_szOperands[0]; break; 
-            case 2: hFile << std::setw(10) << pDasmInst->m_szMnemonic << ' ' << pDasmInst->m_szOperands[0] << ", " << pDasmInst->m_szOperands[1]; break;
-            case 3: hFile << std::setw(10) << pDasmInst->m_szMnemonic << ' ' << pDasmInst->m_szOperands[0] << ", " << pDasmInst->m_szOperands[1]
+            case 0: ssOut << std::setw(10) << pDasmInst->m_szMnemonic; break;
+            case 1: ssOut << std::setw(10) << pDasmInst->m_szMnemonic << ' ' << pDasmInst->m_szOperands[0]; break; 
+            case 2: ssOut << std::setw(10) << pDasmInst->m_szMnemonic << ' ' << pDasmInst->m_szOperands[0] << ", " << pDasmInst->m_szOperands[1]; break;
+            case 3: ssOut << std::setw(10) << pDasmInst->m_szMnemonic << ' ' << pDasmInst->m_szOperands[0] << ", " << pDasmInst->m_szOperands[1]
                     << ", " << pDasmInst->m_szOperands[2]; break;
-            case 4: hFile << std::setw(10) << pDasmInst->m_szMnemonic << ' ' << pDasmInst->m_szOperands[0] << ", " << pDasmInst->m_szOperands[1]
+            case 4: ssOut << std::setw(10) << pDasmInst->m_szMnemonic << ' ' << pDasmInst->m_szOperands[0] << ", " << pDasmInst->m_szOperands[1]
                     << ", " << pDasmInst->m_szOperands[2] << ", " << pDasmInst->m_szOperands[3]; break;
 
             default: break;
         }
-
-        hFile << '\n';
     }
 
-    hFile << "----------------------------------------------------------------------------" << std::endl;
+    ssOut << '\n' << "----------------------------------------------------------------------------" << std::endl;
 
 
+    // Deallocate all arenas...
     allocator.FreeAll();
+
+    // Return whehter this disassembly was valid or not.
+    return bPasssedCrashLoc;
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+static bool DeadStop::IsMemoryRegionRedable(const std::vector<MemRegion_t>& vecValidMemRegions, const MemRegion_t& targetRegion)
+{
+    assertion(targetRegion.m_iStart < targetRegion.m_iEnd && "Invalid Memory Region");
+
+    // NOTE : MemRegion_t.m_iEnd can't be accessed.
+    for(const MemRegion_t& memRegion : vecValidMemRegions)
+    {
+        bool bStartValid = targetRegion.m_iStart >= memRegion.m_iStart && targetRegion.m_iStart < memRegion.m_iEnd;
+        bool bEndValid   = targetRegion.m_iEnd   >= memRegion.m_iStart && targetRegion.m_iEnd   < memRegion.m_iEnd;
+
+        if(bStartValid == true && bEndValid == true)
+            return true;
+    }
+
+    return false;
 }
 
 
