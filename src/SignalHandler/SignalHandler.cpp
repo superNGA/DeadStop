@@ -21,6 +21,7 @@
 #include "../../lib/IDASM/Include/Legacy/LegacyInst_t.h"
 #include "../../lib/IDASM/Include/VEX/VEXInst_t.h"
 #include "../../lib/IDASM/Include/EVEX/EVEXInst_t.h"
+#include "../../lib/IDASM/Include/Standard/OpCodeDesc_t.h"
 
 // Utility
 #include "../Util/Assertion/Assertion.h"
@@ -53,8 +54,13 @@ namespace DEADSTOP_NAMESPACE
     static bool DumpAssembly(
             std::fstream& hFile, const std::vector<MemRegion_t>& vecValidMemRegions, 
             int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext, int iAsmDumpRangeInBytes);
-    static bool GenerateDasmOutput(std::stringstream& ssOut, uintptr_t iStartAdrs, const std::vector<InsaneDASM64::Byte>& vecBytes, uintptr_t pCrashLocation);
+
+    static bool GenerateDasmOutput(std::stringstream& ssOut, uintptr_t iStartAdrs, const std::vector<InsaneDASM64::Byte>& vecBytes, uintptr_t pCrashLocation,
+            const std::vector<MemRegion_t>& vecValidMemRegions, ucontext_t* pContext);
+
     static bool IsMemoryRegionRedable(const std::vector<MemRegion_t>& vecValidMemRegions, const MemRegion_t& targetRegion);
+    static const char* FindInstPointerToString(
+            InsaneDASM64::Instruction_t& inst, uintptr_t iStartAdrs, const ucontext_t* pContext, const std::vector<MemRegion_t>& vecValidMemRegions);
 
     // Write-to-file fns...
     static void DumpGeneralRegisters(std::fstream& hFile, ucontext_t* pContext);
@@ -152,8 +158,10 @@ static bool DeadStop::DumpAssembly(
         return false;
     }
 
+
     assertion(pCrashLocation > iAsmDumpRangeInBytes && "Invalid dump range or crash location?");
-    assertion(iAsmDumpRangeInBytes < 0x1000 && "Too big dump range");
+    assertion(iAsmDumpRangeInBytes > 0 && iAsmDumpRangeInBytes < 0x1000 && "invalid or Too big dump range");
+
     MemRegion_t memDumpRegion(static_cast<intptr_t>(pCrashLocation) - iAsmDumpRangeInBytes, pCrashLocation + iAsmDumpRangeInBytes);
     if(IsMemoryRegionRedable(vecValidMemRegions, memDumpRegion) == false)
     {
@@ -178,8 +186,8 @@ static bool DeadStop::DumpAssembly(
         // Checking aginst modified region.
         if(IsMemoryRegionRedable(vecValidMemRegions, memDumpRegion) == false)
         {
-            hFile << "Dump region's couldn't be read.\n";
-            FAIL_LOG("Dump region's couldn't be read.\n");
+            hFile << "Dump region couldn't be read.\n";
+            FAIL_LOG("Dump region couldn't be read.\n");
             return false;
         }
     }
@@ -206,7 +214,7 @@ static bool DeadStop::DumpAssembly(
 
 
         ssDasmOutput.clear(); ssDasmOutput.str("");
-        if(GenerateDasmOutput(ssDasmOutput, iStartAdrs, vecBytes, pCrashLocation) == true)
+        if(GenerateDasmOutput(ssDasmOutput, iStartAdrs, vecBytes, pCrashLocation, vecValidMemRegions, pContext) == true)
         {
             WIN_LOG("Disassembly verified.");
             bDasmSucceded = true;
@@ -238,7 +246,8 @@ static bool DeadStop::DumpAssembly(
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
 static bool DeadStop::GenerateDasmOutput(
-        std::stringstream& ssOut, uintptr_t iStartAdrs, const std::vector<InsaneDASM64::Byte>& vecBytes, uintptr_t pCrashLocation)
+        std::stringstream& ssOut, uintptr_t iStartAdrs, const std::vector<InsaneDASM64::Byte>& vecBytes, uintptr_t pCrashLocation,
+        const std::vector<MemRegion_t>& vecValidMemRegions, ucontext_t* pContext)
 {
     // Decoder & Disassembler.
     std::vector<InsaneDASM64::Instruction_t> vecDecodedInst;
@@ -283,6 +292,9 @@ static bool DeadStop::GenerateDasmOutput(
 
     for(size_t iInstIndex = 0; iInstIndex < vecDecodedInst.size(); iInstIndex++)
     {
+        if(iInstAdrs == pCrashLocation)
+            bPasssedCrashLoc = true;
+
         ssTemp.clear();
         ssTemp.str("");
 
@@ -442,16 +454,6 @@ static bool DeadStop::GenerateDasmOutput(
 
             default: break;
         }
-
-
-        // if @ crash location, mark it.
-        if(iInstAdrs == pCrashLocation)
-        {
-            bPasssedCrashLoc = true;
-            ssOut << "  <--[ Crashed here ]";
-        }
-        ssOut << '\n'; // This newline character is for the previous line.
-        
         ssTemp << std::nouppercase << std::dec << std::setfill(' ');
         ssOut << "0x" << std::hex << iInstAdrs << std::dec << "    " << std::left << std::setw(32) << ssTemp.str();
 
@@ -470,6 +472,22 @@ static bool DeadStop::GenerateDasmOutput(
 
             default: break;
         }
+
+        // if at crash inst. address, mark it.
+        if(iInstAdrs - iTotalBytes == pCrashLocation)
+            ssOut << "  <--[ crashed here ]";
+
+        // Finding potential string pointer in this instruction.
+        const char* szPotentialString = FindInstPointerToString(*pInst, iInstAdrs - iTotalBytes, pContext, vecValidMemRegions);
+        if(szPotentialString != nullptr)
+        {
+            ssOut << " ; ";
+            for(int i = 0; i < 5; i++)
+                ssOut << szPotentialString[i];
+        }
+
+
+        ssOut << '\n';
     }
 
     ssOut << '\n' << "----------------------------------------------------------------------------" << std::endl;
@@ -500,6 +518,156 @@ static bool DeadStop::IsMemoryRegionRedable(const std::vector<MemRegion_t>& vecV
     }
 
     return false;
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+static const char* DeadStop::FindInstPointerToString(
+        InsaneDASM64::Instruction_t& inst, uintptr_t iStartAdrs, const ucontext_t* pContext, const std::vector<MemRegion_t>& vecValidMemRegions)
+{
+    // In this function we will try to extract any poitners for some specific decoded instructions, 
+    // and check if they point to some valid string in our processes memory region.
+    //
+    // Only LEA and legacy instructions with an 8 byte immediate, will be considered as potentially
+    // "usefull".
+    //
+    // Fail output is nullptr, valid output is pointer to the string ( check against processes boundaries ).
+    if(inst.m_iInstEncodingType != InsaneDASM64::Instruction_t::InstEncodingType_Legacy)
+        return nullptr;
+
+
+    InsaneDASM64::Legacy::LegacyInst_t* pLegacyInst = reinterpret_cast<InsaneDASM64::Legacy::LegacyInst_t*>(inst.m_pInst);
+    int iInstLengthInBytes = 0; // instruction length in bytes.
+    {
+        iInstLengthInBytes += pLegacyInst->m_legacyPrefix.m_nPrefix;
+        iInstLengthInBytes += pLegacyInst->m_bHasREX == true ? 1 : 0;
+        iInstLengthInBytes += pLegacyInst->m_opCode.m_nOpBytes;
+        iInstLengthInBytes += pLegacyInst->m_bHasModRM == true ? 1 : 0;
+        iInstLengthInBytes += pLegacyInst->m_bHasSIB == true ? 1 : 0;
+        iInstLengthInBytes += pLegacyInst->m_displacement.ByteCount();
+        iInstLengthInBytes += pLegacyInst->m_immediate.ByteCount();
+    }
+
+    if(pLegacyInst->m_opCode.m_pOpCodeDesc == nullptr)
+        return nullptr;
+
+
+    // To get the REG enum value corrosponding to modrm_rm or modrm_reg anything intel.
+    static int s_regIndexToEnum[] = { REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RBP, REG_RSI, REG_RDI, 
+        REG_R8, REG_R9, REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15 };
+
+
+    // We will check this location for a valid string after filling it up.
+    const char* szFinalPointer = nullptr;
+
+
+    // We have a LEA instruction.
+    if(strcmp(pLegacyInst->m_opCode.m_pOpCodeDesc->m_szName, "LEA") == 0)
+    {
+        if(pLegacyInst->ModRM_RM() != 0b100)
+        {
+            intptr_t iBaseReg =
+                static_cast<intptr_t>(pContext->uc_mcontext.gregs[s_regIndexToEnum[pLegacyInst->ModRM_RM()]]);
+
+
+            // Register holds to BS memory adrs?
+            if(IsMemoryRegionRedable(vecValidMemRegions, MemRegion_t(iBaseReg - 1, iBaseReg + 1)) == false)
+                return nullptr;
+
+            // Get the displacement value if there are any displacement bytes.
+            // NOTE : Doing it this way assures that endians are handled correctly.
+            int32_t iDisplacement = *reinterpret_cast<int32_t*>(&pLegacyInst->m_displacement.m_iDispBytes[0]);
+            switch(pLegacyInst->m_displacement.ByteCount())
+            {
+                // Single byte displacement. No need to worry about endians.
+                case 1: iDisplacement &= 0xFF; break;
+                case 2: iDisplacement &= 0xFFFF; break;
+                case 4: iDisplacement &= 0xFFFFFFFF; break;
+
+                default: iDisplacement = 0; break;
+            }
+
+
+            if(pLegacyInst->ModRM_Mod() != 0b11)
+                iBaseReg = *reinterpret_cast<intptr_t*>(iBaseReg);
+
+
+            // Incase of mod == 00 & rm = 101, we need to do : disp32 + RIP
+            if(pLegacyInst->ModRM_Mod() == 0b00 && pLegacyInst->ModRM_RM() == 0b101)
+            {
+                iBaseReg = static_cast<intptr_t>(iStartAdrs) + static_cast<intptr_t>(iInstLengthInBytes);
+            }
+
+
+            // Register is pointing to BS memory adrs?
+            if(IsMemoryRegionRedable(vecValidMemRegions, MemRegion_t(iBaseReg - 1, iBaseReg + 1)) == false)
+            {
+                FAIL_LOG("Base reg [ %p ] not redable", iBaseReg);
+                return nullptr;
+            }
+
+
+            // Final adrs...
+            szFinalPointer = reinterpret_cast<const char*>(iBaseReg + iDisplacement);
+        }
+        else
+        {
+            intptr_t iBaseReg  = 
+                static_cast<intptr_t>(pContext->uc_mcontext.gregs[s_regIndexToEnum[pLegacyInst->SIB_Scale()]]);
+            intptr_t iScaleReg =
+                static_cast<intptr_t>(pContext->uc_mcontext.gregs[s_regIndexToEnum[pLegacyInst->SIB_Index()]]);
+
+
+            // Get the displacement value if there are any displacement bytes.
+            // NOTE : Doing it this way assures that endians are handled correctly.
+            int32_t iDisplacement = *reinterpret_cast<int32_t*>(&pLegacyInst->m_displacement.m_iDispBytes[0]);
+            switch(pLegacyInst->m_displacement.ByteCount())
+            {
+                // Single byte displacement. No need to worry about endians.
+                case 1: iDisplacement &= 0xFF; break;
+                case 2: iDisplacement &= 0xFFFF; break;
+                case 4: iDisplacement &= 0xFFFFFFFF; break;
+
+                default: iDisplacement = 0; break;
+            }
+
+
+            // Scale register...
+            if(pLegacyInst->SIB_Index() == 0b100)
+                iScaleReg = 0;
+
+
+            // Base register...
+            if(pLegacyInst->SIB_Base() == 0b101)
+            {
+                iBaseReg = 0;
+
+                if(pLegacyInst->ModRM_Mod() == 0b01)
+                {
+                    iBaseReg       = static_cast<intptr_t>(pContext->uc_mcontext.gregs[REG_RBP]);
+                    iDisplacement &= 0xFF;
+                }
+                else if(pLegacyInst->ModRM_Mod() == 0b10)
+                {
+                    iBaseReg = static_cast<intptr_t>(pContext->uc_mcontext.gregs[REG_RBP]);
+                }
+            }
+
+            static int s_iScaleRegMult[4] = {1, 2, 4, 8};
+            iScaleReg *= static_cast<intptr_t>(s_iScaleRegMult[pLegacyInst->SIB_Scale()]);
+
+            szFinalPointer = reinterpret_cast<const char*>(iBaseReg + iScaleReg + iDisplacement);
+        }
+    }
+
+    bool bFinalPointerValid = 
+        IsMemoryRegionRedable(vecValidMemRegions, MemRegion_t(reinterpret_cast<uintptr_t>(szFinalPointer), reinterpret_cast<uintptr_t>(szFinalPointer + 1)));
+    if(bFinalPointerValid == false)
+        return nullptr;
+
+
+    return szFinalPointer;
 }
 
 

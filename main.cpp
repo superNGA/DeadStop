@@ -6,6 +6,10 @@
 // A bad funtion that will crash...
 static void BadFunction()
 {
+    const char* szStringMaxPro = "niga1niga2niga3";
+    for(int i = 0; i < 500; i++)
+        printf("%c", szStringMaxPro[i]);
+
     int* pA = reinterpret_cast<int*>(0xCDCDCDCDCDCDCDCD);
     *pA = 500;
 }
@@ -16,7 +20,7 @@ static void BadFunction()
 ///////////////////////////////////////////////////////////////////////////
 int main(void)
 {
-    if(DeadStop::Initialize("testdump.txt") != DeadStop::ErrCode_Success)
+    if(DeadStop::Initialize("testdump.txt", 100) != DeadStop::ErrCode_Success)
     {
         std::cout << "Failed to initialize DeadStop.\n";
         return 1;
