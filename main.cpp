@@ -7,11 +7,18 @@
 static void BadFunction()
 {
     const char* szStringMaxPro = "niga1niga2niga3";
-    for(int i = 0; i < 500; i++)
-        printf("%c", szStringMaxPro[i]);
+    printf("%s\n", szStringMaxPro);
+    // for(int i = 0; i < 500; i++)
+        // printf("%c", szStringMaxPro[i]);
 
     int* pA = reinterpret_cast<int*>(0xCDCDCDCDCDCDCDCD);
     *pA = 500;
+
+    int a = 10;
+    int b = 10020;
+    if(a + b == 2)
+        return;
+    return;
 }
 
 

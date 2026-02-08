@@ -15,6 +15,8 @@
 #include <iostream>
 #include <fstream>
 #include <string>
+#include <vector>
+#include <deque>
 
 // Disassembler.
 #include "../../lib/IDASM/Include/INSANE_DisassemblerAMD64.h"
@@ -26,49 +28,37 @@
 // Utility
 #include "../Util/Assertion/Assertion.h"
 #include "../Util/Terminal/Terminal.h"
+#include "../Defs/MemRegion_t.h"
 
 
 // Mind this...
 using namespace DeadStop;
 
 
-///////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////
-namespace DEADSTOP_NAMESPACE
-{
-    struct MemRegion_t
-    {
-        MemRegion_t() { m_iStart = 0; m_iEnd = 0; }
-        MemRegion_t(uintptr_t iStart, uintptr_t iEnd) { m_iStart = iStart; m_iEnd = iEnd; };
-
-        uintptr_t m_iStart = 0;
-        uintptr_t m_iEnd   = 0;
-    };
-}
 
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
 namespace DEADSTOP_NAMESPACE
 {
-    static bool DumpAssembly(
-            std::fstream& hFile, const std::vector<MemRegion_t>& vecValidMemRegions, 
-            int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext, int iAsmDumpRangeInBytes);
+    // Global vars...
+    MemRegionHandler_t g_memRegionHandler;
+    siginfo_t*         g_pSigInfo = nullptr;
+    ucontext_t*        g_pContext = nullptr;
 
-    static bool GenerateDasmOutput(std::stringstream& ssOut, uintptr_t iStartAdrs, const std::vector<InsaneDASM64::Byte>& vecBytes, uintptr_t pCrashLocation,
-            const std::vector<MemRegion_t>& vecValidMemRegions, ucontext_t* pContext);
 
-    static bool IsMemoryRegionRedable(const std::vector<MemRegion_t>& vecValidMemRegions, const MemRegion_t& targetRegion);
-    static const char* FindInstPointerToString(
-            InsaneDASM64::Instruction_t& inst, uintptr_t iStartAdrs, const ucontext_t* pContext, const std::vector<MemRegion_t>& vecValidMemRegions);
 
-    // Write-to-file fns...
-    static void DumpGeneralRegisters(std::fstream& hFile, ucontext_t* pContext);
+    static bool DumpAssembly(std::fstream& hFile, int iSignalID, int iAsmDumpRangeInBytes);
+    static bool GenerateDasmOutput(std::stringstream& ssOut, uintptr_t iStartAdrs, const std::vector<InsaneDASM64::Byte>& vecBytes, uintptr_t pCrashLocation);
+    static const char* FindInstPointerToString(InsaneDASM64::Instruction_t& inst, uintptr_t iStartAdrs);
+    static bool Analyze();
+    static uintptr_t GetReturnAdrs(uintptr_t iStartPos);
 
-    static void DumpDateTime(std::fstream& hFile);
-    static inline void DoBranding(std::fstream& hFile) { hFile << "[ DeadStop ] "; }
-
-    static bool GetProcSelfMaps(std::vector<MemRegion_t>& vecRegionsOut);
+    // Write to File.
+    static void WriteSelfMaps       (std::fstream& hFile);
+    static void DumpGeneralRegisters(std::fstream& hFile);
+    static void DumpDateTime        (std::fstream& hFile);
+    static void DoBranding          (std::fstream& hFile);
 }
 
 
@@ -80,7 +70,6 @@ void DeadStop::MasterSignalHandler(int iSignalID, siginfo_t* pSigInfo, void* pCo
     // Is initialized?
     if(DeadStop_t::GetInstance().IsInitialized() == false)
         return; 
-
 
     std::fstream hFile(DeadStop_t::GetInstance().GetDumpFilePath(), std::ios::app);
 
@@ -96,19 +85,26 @@ void DeadStop::MasterSignalHandler(int iSignalID, siginfo_t* pSigInfo, void* pCo
     DoBranding(hFile); hFile << "Starting log dump @ ";
     DumpDateTime(hFile);
     hFile << '\n';
+    /* Prologue ends here */
+
+
+    g_pContext = reinterpret_cast<ucontext_t*>(pContext);
+    g_pSigInfo = pSigInfo;
 
 
     // Getting "this" process's memory regions.
     std::vector<MemRegion_t> vecSelfMaps; 
-    if(GetProcSelfMaps(vecSelfMaps) == false) // Must not fail.
+    if(g_memRegionHandler.InitializeFromFile("/proc/self/maps") == false) // Must not fail.
     {
         DoBranding(hFile); hFile << "Failed to open \"/proc/self/maps\". Cannot proceed any further.\n";
         return;
     }
+    WriteSelfMaps(hFile);
     WIN_LOG("Got processes memory regions.");
 
 
-    ucontext_t* pUContext = reinterpret_cast<ucontext_t*>(pContext);
+
+    // Write the signal ID.
     switch(iSignalID)
     {
         case SIGSEGV:  DoBranding(hFile); hFile << "Signal received [ SIGSEGV ] i.e. Segfault\n"; break;
@@ -124,24 +120,21 @@ void DeadStop::MasterSignalHandler(int iSignalID, siginfo_t* pSigInfo, void* pCo
 
     // Dump all general purpose registers with their values.
     hFile << "\n\n";
-    DumpGeneralRegisters(hFile, pUContext);
+    DumpGeneralRegisters(hFile);
     WIN_LOG("Dumped registers.");
 
 
+    Analyze();
+
     hFile << "\n\n";
-    bool bAsmDumpWin = DumpAssembly(hFile, vecSelfMaps, iSignalID, pSigInfo, pUContext, DeadStop_t::GetInstance().GetAsmDumpRange());
-
-    if(bAsmDumpWin == true)
-        WIN_LOG("Dumped crash location's assembly.");
-    else
-        FAIL_LOG("Failed to dump assembly to crash logs.");
+    // bool bAsmDumpWin = DumpAssembly(hFile, iSignalID, DeadStop_t::GetInstance().GetAsmDumpRange());
 
 
+    // Epilogue
     DoBranding(hFile); hFile << "Log dump ended @ ";
     DumpDateTime(hFile);
     hFile << '\n';
     hFile << "///////////////////////////////////////////////////////////////////////////\n";
-
     hFile.close();
     exit(1);
 }
@@ -149,16 +142,39 @@ void DeadStop::MasterSignalHandler(int iSignalID, siginfo_t* pSigInfo, void* pCo
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
-static bool DeadStop::DumpAssembly(
-        std::fstream& hFile, const std::vector<MemRegion_t>& vecValidMemRegions, 
-        int iSignalID, siginfo_t* pSigInfo, ucontext_t* pContext, int iAsmDumpRangeInBytes)
+static void DeadStop::WriteSelfMaps(std::fstream& hFile)
 {
-    uintptr_t pCrashLocation = static_cast<uintptr_t>(pContext->uc_mcontext.gregs[REG_RIP]);
+    std::ifstream hMaps("/proc/self/maps");
+
+    // If we can't open this, something must be really wrong.
+    if(hMaps.is_open() == false)
+        return;
+
+    hFile << "------------------------------- Mapped Memory Regoins -------------------------------\n";
+
+    std::string szLine;
+    while(std::getline(hMaps, szLine))
+    {
+        hFile << szLine << std::endl;
+    }
+
+    hFile << "-------------------------------------------------------------------------------------\n\n\n";
+
+    hMaps.close();
+    return;
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+static bool DeadStop::DumpAssembly(std::fstream& hFile, int iSignalID, int iAsmDumpRangeInBytes)
+{
+    uintptr_t pCrashLocation = static_cast<uintptr_t>(g_pContext->uc_mcontext.gregs[REG_RIP]);
 
 
     // Does the crash location belong to the process?
     MemRegion_t memRegionCrashLoc(pCrashLocation - 10, pCrashLocation + 10);
-    if(IsMemoryRegionRedable(vecValidMemRegions, memRegionCrashLoc) == false)
+    if(g_memRegionHandler.HasParentRegion(pCrashLocation) == false)
     {
         FAIL_LOG("Crash location [ %p ] is not a redable memory location. Cannot dump crash logs.", pCrashLocation);
         return false;
@@ -167,16 +183,16 @@ static bool DeadStop::DumpAssembly(
 
     assertion(pCrashLocation > iAsmDumpRangeInBytes && "Invalid dump range or crash location?");
     assertion(iAsmDumpRangeInBytes > 0 && iAsmDumpRangeInBytes < 0x1000 && "invalid or Too big dump range");
-
-    MemRegion_t memDumpRegion(static_cast<intptr_t>(pCrashLocation) - iAsmDumpRangeInBytes, pCrashLocation + iAsmDumpRangeInBytes);
-    if(IsMemoryRegionRedable(vecValidMemRegions, memDumpRegion) == false)
+    uintptr_t iAsmDumpStart = pCrashLocation - iAsmDumpRangeInBytes;
+    uintptr_t iAsmDumpEnd   = pCrashLocation + iAsmDumpRangeInBytes;
+    if(g_memRegionHandler.HasParentRegion(iAsmDumpStart, iAsmDumpEnd) == false)
     {
         hFile << "Some parts of the dump regions [ " << 
-            std::hex << memDumpRegion.m_iStart << " - " << memDumpRegion.m_iEnd << 
+            std::hex << iAsmDumpStart << " - " << iAsmDumpEnd << 
             " ] can't be read, reducing dump region to 100 byte above & below\n";
 
         FAIL_LOG("Some parts of the dump regions [ 0x%016llX - 0x%016llX ] can't be read, reducing dump region to 100 byte above & below",
-                memDumpRegion.m_iStart, memDumpRegion.m_iEnd);
+                iAsmDumpStart, iAsmDumpEnd);
 
 
         // Incase the initial memory region was smaller than 100 bytes and even
@@ -184,13 +200,13 @@ static bool DeadStop::DumpAssembly(
         // is fucked up real bad. Just leave now.
         if(iAsmDumpRangeInBytes > 100)
         {
-            memDumpRegion.m_iStart = static_cast<intptr_t>(pCrashLocation) - 100; 
-            memDumpRegion.m_iEnd   = pCrashLocation + 100;
+            iAsmDumpStart = static_cast<intptr_t>(pCrashLocation) - 100; 
+            iAsmDumpEnd   = pCrashLocation + 100;
         }
         
 
         // Checking aginst modified region.
-        if(IsMemoryRegionRedable(vecValidMemRegions, memDumpRegion) == false)
+        if(g_memRegionHandler.HasParentRegion(iAsmDumpStart, iAsmDumpEnd) == false)
         {
             hFile << "Dump region couldn't be read.\n";
             FAIL_LOG("Dump region couldn't be read.\n");
@@ -220,7 +236,7 @@ static bool DeadStop::DumpAssembly(
 
 
         ssDasmOutput.clear(); ssDasmOutput.str("");
-        if(GenerateDasmOutput(ssDasmOutput, iStartAdrs, vecBytes, pCrashLocation, vecValidMemRegions, pContext) == true)
+        if(GenerateDasmOutput(ssDasmOutput, iStartAdrs, vecBytes, pCrashLocation) == true)
         {
             WIN_LOG("Disassembly verified.");
             bDasmSucceded = true;
@@ -252,8 +268,7 @@ static bool DeadStop::DumpAssembly(
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
 static bool DeadStop::GenerateDasmOutput(
-        std::stringstream& ssOut, uintptr_t iStartAdrs, const std::vector<InsaneDASM64::Byte>& vecBytes, uintptr_t pCrashLocation,
-        const std::vector<MemRegion_t>& vecValidMemRegions, ucontext_t* pContext)
+        std::stringstream& ssOut, uintptr_t iStartAdrs, const std::vector<InsaneDASM64::Byte>& vecBytes, uintptr_t pCrashLocation)
 {
     // Decoder & Disassembler.
     std::vector<InsaneDASM64::Instruction_t> vecDecodedInst;
@@ -485,7 +500,7 @@ static bool DeadStop::GenerateDasmOutput(
 
 
         // Finding potential string pointer in this instruction.
-        const char* szPotentialString = FindInstPointerToString(*pInst, iInstAdrs - iTotalBytes, pContext, vecValidMemRegions);
+        const char* szPotentialString = FindInstPointerToString(*pInst, iInstAdrs - iTotalBytes);
         if(szPotentialString != nullptr)
         {
             ssOut << " ; ";
@@ -493,8 +508,8 @@ static bool DeadStop::GenerateDasmOutput(
             // Checking if we can read 20 bytes of this potential string.
             int iCharsToRead = DeadStop_t::GetInstance().GetStringDumpSize();
 
-            if(IsMemoryRegionRedable(vecValidMemRegions, 
-                        MemRegion_t(reinterpret_cast<uintptr_t>(szPotentialString), reinterpret_cast<uintptr_t>(szPotentialString + iCharsToRead))) == true)
+            uintptr_t iPotentialStringAdrs = reinterpret_cast<uintptr_t>(szPotentialString);
+            if(g_memRegionHandler.HasParentRegion(iPotentialStringAdrs, iPotentialStringAdrs + iCharsToRead) == true)
             {
                 for(int i = 0; i < iCharsToRead && szPotentialString[i] != '\0'; i++)
                 {
@@ -520,28 +535,7 @@ static bool DeadStop::GenerateDasmOutput(
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
-static bool DeadStop::IsMemoryRegionRedable(const std::vector<MemRegion_t>& vecValidMemRegions, const MemRegion_t& targetRegion)
-{
-    assertion(targetRegion.m_iStart <= targetRegion.m_iEnd && "Invalid Memory Region");
-
-    // NOTE : MemRegion_t.m_iEnd can't be accessed.
-    for(const MemRegion_t& memRegion : vecValidMemRegions)
-    {
-        bool bStartValid = targetRegion.m_iStart >= memRegion.m_iStart && targetRegion.m_iStart < memRegion.m_iEnd;
-        bool bEndValid   = targetRegion.m_iEnd   >= memRegion.m_iStart && targetRegion.m_iEnd   < memRegion.m_iEnd;
-
-        if(bStartValid == true && bEndValid == true)
-            return true;
-    }
-
-    return false;
-}
-
-
-///////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////
-static const char* DeadStop::FindInstPointerToString(
-        InsaneDASM64::Instruction_t& inst, uintptr_t iStartAdrs, const ucontext_t* pContext, const std::vector<MemRegion_t>& vecValidMemRegions)
+static const char* DeadStop::FindInstPointerToString(InsaneDASM64::Instruction_t& inst, uintptr_t iStartAdrs)
 {
     // In this function we will try to extract any poitners for some specific decoded instructions, 
     // and check if they point to some valid string in our processes memory region.
@@ -600,7 +594,7 @@ static const char* DeadStop::FindInstPointerToString(
 
 
             intptr_t iBaseReg =
-                static_cast<intptr_t>(pContext->uc_mcontext.gregs[s_regIndexToEnum[pLegacyInst->ModRM_RM()]]);
+                static_cast<intptr_t>(g_pContext->uc_mcontext.gregs[s_regIndexToEnum[pLegacyInst->ModRM_RM()]]);
 
 
             // Incase of mod == 00 & rm = 101, we need to do : disp32 + RIP
@@ -611,7 +605,7 @@ static const char* DeadStop::FindInstPointerToString(
             else if(pLegacyInst->ModRM_Mod() != 0b11)
             {
                 // Register holds to BS memory adrs?
-                if(IsMemoryRegionRedable(vecValidMemRegions, MemRegion_t(iBaseReg - 1, iBaseReg + 1)) == false)
+                if(g_memRegionHandler.HasParentRegion(iBaseReg) == false)
                     return nullptr;
 
                 iBaseReg = *reinterpret_cast<intptr_t*>(iBaseReg);
@@ -619,7 +613,7 @@ static const char* DeadStop::FindInstPointerToString(
 
 
             // Base register is pointing at valid memory address or not?
-            if(IsMemoryRegionRedable(vecValidMemRegions, MemRegion_t(iBaseReg - 1, iBaseReg + 1)) == false)
+            if(g_memRegionHandler.HasParentRegion(iBaseReg) == false)
                 return nullptr;
 
 
@@ -631,9 +625,9 @@ static const char* DeadStop::FindInstPointerToString(
         else
         {
             intptr_t iBaseReg  = 
-                static_cast<intptr_t>(pContext->uc_mcontext.gregs[s_regIndexToEnum[pLegacyInst->SIB_Scale()]]);
+                static_cast<intptr_t>(g_pContext->uc_mcontext.gregs[s_regIndexToEnum[pLegacyInst->SIB_Scale()]]);
             intptr_t iScaleReg =
-                static_cast<intptr_t>(pContext->uc_mcontext.gregs[s_regIndexToEnum[pLegacyInst->SIB_Index()]]);
+                static_cast<intptr_t>(g_pContext->uc_mcontext.gregs[s_regIndexToEnum[pLegacyInst->SIB_Index()]]);
 
 
             // Get the displacement value if there are any displacement bytes.
@@ -662,12 +656,12 @@ static const char* DeadStop::FindInstPointerToString(
 
                 if(pLegacyInst->ModRM_Mod() == 0b01)
                 {
-                    iBaseReg       = static_cast<intptr_t>(pContext->uc_mcontext.gregs[REG_RBP]);
+                    iBaseReg       = static_cast<intptr_t>(g_pContext->uc_mcontext.gregs[REG_RBP]);
                     iDisplacement &= 0xFF;
                 }
                 else if(pLegacyInst->ModRM_Mod() == 0b10)
                 {
-                    iBaseReg = static_cast<intptr_t>(pContext->uc_mcontext.gregs[REG_RBP]);
+                    iBaseReg = static_cast<intptr_t>(g_pContext->uc_mcontext.gregs[REG_RBP]);
                 }
             }
 
@@ -680,9 +674,9 @@ static const char* DeadStop::FindInstPointerToString(
         }
     }
 
-    bool bFinalPointerValid = 
-        IsMemoryRegionRedable(vecValidMemRegions, MemRegion_t(reinterpret_cast<uintptr_t>(szFinalPointer), reinterpret_cast<uintptr_t>(szFinalPointer + 1)));
-    if(bFinalPointerValid == false)
+
+    // Final string lies in redable memory?
+    if(g_memRegionHandler.HasParentRegion(reinterpret_cast<uintptr_t>(szFinalPointer)) == false)
         return nullptr;
 
 
@@ -692,7 +686,216 @@ static const char* DeadStop::FindInstPointerToString(
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
-static void DeadStop::DumpGeneralRegisters(std::fstream& hFile, ucontext_t* pContext)
+static bool DeadStop::Analyze()
+{
+    uintptr_t pCrashLoc = static_cast<uintptr_t>(g_pContext->uc_mcontext.gregs[REG_RIP]);
+
+    std::vector<uintptr_t> vecCallStack; vecCallStack.push_back(pCrashLoc);
+
+    for(int i = 0; i < 2; i++)
+    {
+        uintptr_t iReturnAdrs = GetReturnAdrs(vecCallStack.back());
+        LOG("Return address detected : %p", iReturnAdrs);
+
+        if(iReturnAdrs == 0)
+            break;
+
+        vecCallStack.push_back(iReturnAdrs);
+    }
+
+
+    return true;
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
+{
+    if(DeadStop_t::GetInstance().IsInitialized() == false)
+        return 0;
+
+
+    ArenaAllocator_t allocator(8 * 1024); // 8 KiB arenas.
+    
+    // Rolling buffer for valid instruction pointers.
+    constexpr size_t MAX_ADRS_BUFFER = 10;
+    std::deque<uintptr_t> qValidInstAdrs;
+    qValidInstAdrs.push_back(iStartPos);
+
+
+    constexpr size_t DASM_BATCH_SIZE = 200;
+    std::vector<InsaneDASM64::Byte> vecBytes(DASM_BATCH_SIZE);
+    std::vector<InsaneDASM64::Instruction_t> vecInst;
+
+
+    uintptr_t iRetInstAdrs = 0;
+    bool      bRetFound    = false;
+    for(int i = 0; i < 100; i++)
+    {
+        uintptr_t iBatchStartAdrs = qValidInstAdrs.back();
+        uintptr_t iBatchEndAdrs   = iBatchStartAdrs + DASM_BATCH_SIZE;
+
+        // Check if batch lies in valid memory or not.
+        if(g_memRegionHandler.HasParentRegion(iBatchStartAdrs, iBatchEndAdrs) == false)
+            break;
+
+
+        // Store bytes.
+        vecBytes.clear();
+        for(size_t iByteIndex = 0; iByteIndex < DASM_BATCH_SIZE; iByteIndex++)
+        {
+            vecBytes.push_back(*(reinterpret_cast<InsaneDASM64::Byte*>(iBatchStartAdrs) + iByteIndex));
+        }
+        assertion(vecBytes.size() == DASM_BATCH_SIZE && "FUCK U NIGGA");
+
+
+        // Decoder using bytes.
+        vecInst.clear();
+        if(InsaneDASM64::Decode(vecBytes, vecInst, allocator) != InsaneDASM64::IDASMErrorCode_Success)
+            break;
+
+
+        // Find return statement.
+        for(InsaneDASM64::Instruction_t& inst : vecInst)
+        {
+            int iInstLength = 0;
+            switch (inst.m_iInstEncodingType) 
+            {
+                case InsaneDASM64::Instruction_t::InstEncodingType_Legacy:
+                    iInstLength += reinterpret_cast<InsaneDASM64::Legacy::LegacyInst_t*>(inst.m_pInst)->GetInstLengthInBytes();
+                    break;
+                case InsaneDASM64::Instruction_t::InstEncodingType_VEX:
+                    iInstLength += reinterpret_cast<InsaneDASM64::VEX::VEXInst_t*>(inst.m_pInst)->GetInstLengthInBytes();
+                    break;
+                case InsaneDASM64::Instruction_t::InstEncodingType_EVEX:
+                    iInstLength += reinterpret_cast<InsaneDASM64::EVEX::EVEXInst_t*>(inst.m_pInst)->GetInstLengthInBytes();
+                    break;
+
+                default: break;
+            }
+            
+
+            qValidInstAdrs.push_back(qValidInstAdrs.back() + iInstLength);
+            if(qValidInstAdrs.size() > MAX_ADRS_BUFFER)
+                qValidInstAdrs.pop_front();
+
+
+            if(inst.m_iInstEncodingType != InsaneDASM64::Instruction_t::InstEncodingType_Legacy)
+                continue;
+
+
+            InsaneDASM64::Legacy::LegacyInst_t* pInst = reinterpret_cast<InsaneDASM64::Legacy::LegacyInst_t*>(inst.m_pInst);
+            if(pInst->m_opCode.m_pOpCodeDesc == nullptr)
+            {
+                FAIL_LOG("Decoder failed :( BS Decoder.");
+                continue;
+            }
+
+            // RETN instuction.
+            // if(pInst->m_opCode.m_pOpCodeDesc->m_iByte == 0xC3 && pInst->m_opCode.m_nOpBytes == 1)
+            if(strcmp(pInst->m_opCode.m_pOpCodeDesc->m_szName, "RETN") == 0)
+            {
+                bRetFound = true;
+                break;
+            }
+        }
+
+        if(bRetFound == true)
+            break;
+
+        // no free. just mark em as free.
+        allocator.ResetAllArena();
+    }
+
+
+    if(bRetFound == false)
+        return 0;
+
+
+    vecBytes.clear(); vecInst.clear();
+    allocator.ResetAllArena();
+    for(uintptr_t iBatchStart = qValidInstAdrs.front(); iBatchStart < qValidInstAdrs.back(); iBatchStart++)
+        vecBytes.push_back(*reinterpret_cast<InsaneDASM64::Byte*>(iBatchStart));
+
+
+    if(InsaneDASM64::Decode(vecBytes, vecInst, allocator) != InsaneDASM64::IDASMErrorCode_Success)
+    {
+        FAIL_LOG("Decoder failed after running over these bytes once. What kind of decoder is this?");
+        return 0;
+    }
+
+    std::vector<InsaneDASM64::DASMInst_t> vecOutput;
+    if(InsaneDASM64::Disassemble(vecInst, vecOutput) != InsaneDASM64::IDASMErrorCode_Success)
+    {
+        FAIL_LOG("Theortically this can't fail, but I'm afraid this stands no chance against you.");
+        return 0;
+    }
+
+    // Verifying decoding results. Final instruction in the output must be RETN
+    if(strcmp(vecOutput.back().m_szMnemonic, "RETN") != 0)
+    {
+        FAIL_LOG("Expected a RETN statement @ the end. But got \"%s\"", vecOutput.back().m_szMnemonic);
+
+        // for(InsaneDASM64::DASMInst_t& inst : vecOutput)
+        // {
+        //     printf("%s", inst.m_szMnemonic);
+        //     for(int i = 0; i < inst.m_nOperands; i++) printf("%s, ", inst.m_szOperands[i]);
+        //     printf("\n");
+        // }
+
+        return 0;
+    }
+
+
+    for(InsaneDASM64::DASMInst_t& inst : vecOutput)
+    {
+        printf("%s", inst.m_szMnemonic);
+        for(int i = 0; i < inst.m_nOperands; i++) printf("%s, ", inst.m_szOperands[i]);
+
+        printf("\n");
+    }
+
+
+    // There are less than 2 instructions between start & RETN instruction.
+    // i.e. Start pos is restoring stack frame or some shit.
+    // We can't determine return adrs without atleast 2 instructions.
+    if(vecInst.size() <= 2)
+        return 0;
+
+    // second last instruction, right above RETN instruction.
+    InsaneDASM64::Instruction_t* pMagicInst = &vecInst[vecInst.size() - 2];
+
+    // What the fuck are we even disassembling?
+    if(pMagicInst->m_iInstEncodingType != InsaneDASM64::Instruction_t::InstEncodingType_Legacy)
+        return 0;
+
+    // If this instrucion is "LEAVE" or "POP rbp", then stack frame is not omitted.
+    InsaneDASM64::Legacy::LegacyInst_t* pSecondLastInst = 
+        reinterpret_cast<InsaneDASM64::Legacy::LegacyInst_t*>(pMagicInst->m_pInst);
+
+    int  iInstLength = pSecondLastInst->GetInstLengthInBytes();
+    bool bLeaveInst  = iInstLength == 1 && pSecondLastInst->m_opCode.GetMostSignificantOpCode() == 0xC9;
+    bool bPopRBP     = iInstLength == 1 && pSecondLastInst->m_opCode.GetMostSignificantOpCode() == 0x5D;
+    bool bStackFrameOmitted = bLeaveInst == false && bPopRBP == false;
+
+
+    // TODO : Add safety check here.
+    // TODO : Understand all return paths n shit.
+    if(bStackFrameOmitted == false)
+    {
+        WIN_LOG("Stack Frame Found");
+        return *reinterpret_cast<uintptr_t*>(static_cast<uintptr_t>(g_pContext->uc_mcontext.gregs[REG_RBP]) + 8);
+    }
+
+
+    return 0;
+}
+
+    
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+static void DeadStop::DumpGeneralRegisters(std::fstream& hFile)
 {
     static const char*  s_szGRegNames[__NGREG] = {
         "REG_R8", "REG_R9", "REG_R10", "REG_R11", "REG_R12", "REG_R13", "REG_R14", "REG_R15",
@@ -719,9 +922,9 @@ static void DeadStop::DumpGeneralRegisters(std::fstream& hFile, ucontext_t* pCon
         hFile << s_szGRegNames[iRegIndex];
         for(int i = 0; i < iMaxRegNameSize - iRegNameSize; i++) hFile << ' ';
         hFile << " : " << 
-            std::setfill('0') << std::setw(16) << pContext->uc_mcontext.gregs[iRegIndex];
+            std::setfill('0') << std::setw(16) << g_pContext->uc_mcontext.gregs[iRegIndex];
 
-        if(pContext->uc_mcontext.gregs[iRegIndex] == 0)
+        if(g_pContext->uc_mcontext.gregs[iRegIndex] == 0)
             hFile << " [ zero ]";
 
         hFile << std::endl;
@@ -729,83 +932,6 @@ static void DeadStop::DumpGeneralRegisters(std::fstream& hFile, ucontext_t* pCon
     hFile << "------------------------------------------------------------------------------" << std::endl;
 
     hFile << std::nouppercase << std::dec << std::setfill(' ');
-}
-
-
-///////////////////////////////////////////////////////////////////////////
-///////////////////////////////////////////////////////////////////////////
-static bool DeadStop::GetProcSelfMaps(std::vector<MemRegion_t>& vecRegionsOut)
-{
-    std::ifstream hMaps("/proc/self/maps");
-
-    // If we can't open this, something must be really wrong.
-    if(hMaps.is_open() == false)
-        return false;
-
-
-    std::string szLine;
-    while(std::getline(hMaps, szLine))
-    {
-        // /proc/self/maps should have "[startadrs]-[EndAdrs]" format.
-        
-        uintptr_t iStartAdrs = 0;
-        uintptr_t iEndAdrs   = 0;
-
-        size_t iterator = 0;
-        size_t nChars = szLine.size();
-
-        // Discarding leading spaces.
-        while(iterator < nChars && szLine[iterator] == ' ') iterator++;
-
-        // Get the first hex number from string.
-        for(; iterator < nChars; iterator++)
-        {
-            char c = szLine[iterator];
-            int iNum = 0;
-
-
-            if(c >= '0' && c <= '9')
-                iNum = c - '0';
-            else if(c >= 'A' && c <= 'F')
-                iNum = c - 'A' + 10;
-            else if(c >= 'a' && c <= 'f')
-                iNum = c - 'a' + 10;
-            else break;
-
-            iStartAdrs *= 0x10;
-            iStartAdrs += iNum;
-        }
-
-        // So we are past whatever character cause "break;" in the loop above.
-        iterator++;
-
-
-        // Get the second hex number from string.
-        for(; iterator < nChars; iterator++)
-        {
-            char c = szLine[iterator];
-            int iNum = 0;
-
-
-            if(c >= '0' && c <= '9')
-                iNum = c - '0';
-            else if(c >= 'A' && c <= 'F')
-                iNum = c - 'A' + 10;
-            else if(c >= 'a' && c <= 'f')
-                iNum = c - 'a' + 10;
-            else break;
-
-            iEndAdrs *= 0x10;
-            iEndAdrs += iNum;
-        }
-
-        // Store em in "out" array.
-        vecRegionsOut.push_back(MemRegion_t(iStartAdrs, iEndAdrs));
-    }
-
-
-    hMaps.close();
-    return true;
 }
 
 
@@ -846,4 +972,12 @@ static void DeadStop::DumpDateTime(std::fstream& hFile)
         << std::setw(2) << std::setfill('0') <<localTime->tm_sec << " "
         << (localTime->tm_hour >= 12 ? "PM" : "AM")
         << " }" << std::setfill(' ');
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+static void DeadStop::DoBranding(std::fstream& hFile)
+{
+    hFile << " [ DeadStop ]";
 }

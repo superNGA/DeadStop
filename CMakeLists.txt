@@ -36,6 +36,10 @@ add_executable(DeadStop
 "src/SignalHandler/SignalHandler.h"
 "src/SignalHandler/SignalHandler.cpp"
 
+# Defs
+"src/Defs/MemRegion_t.h"
+"src/Defs/MemRegion_t.cpp"
+
 # Example ( main.cpp )
 "main.cpp"
 
