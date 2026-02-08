@@ -23,7 +23,7 @@ namespace DEADSTOP_NAMESPACE
     };
 
 
-    ErrCodes_t Initialize(const char* szDumpFilePath, int iAsmDumpRangeInBytes);
+    ErrCodes_t Initialize(const char* szDumpFilePath, int iAsmDumpRangeInBytes, int iStringDumpSize);
     ErrCodes_t Uninitialize();
     const char* GetErrorMessage(ErrCodes_t iErrCode);
 }

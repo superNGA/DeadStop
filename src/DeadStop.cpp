@@ -17,9 +17,9 @@ using namespace DeadStop;
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
-ErrCodes_t DeadStop::Initialize(const char* szDumpFilePath, int iAsmDumpRangeInBytes)
+ErrCodes_t DeadStop::Initialize(const char* szDumpFilePath, int iAsmDumpRangeInBytes, int iStringDumpSize)
 {
-    return DeadStop_t::GetInstance().Initialize(szDumpFilePath, iAsmDumpRangeInBytes);
+    return DeadStop_t::GetInstance().Initialize(szDumpFilePath, iAsmDumpRangeInBytes, iStringDumpSize);
 }
 
 

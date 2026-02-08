@@ -37,15 +37,17 @@ DeadStop_t::DeadStop_t()
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
-ErrCodes_t DeadStop_t::Initialize(const char* szDumpFilePath, int iAsmDumpRangeinBytes)
+ErrCodes_t DeadStop_t::Initialize(const char* szDumpFilePath, int iAsmDumpRangeinBytes, int iStringDumpSize)
 {
     assertion(m_bInitialized == false && "DeadStop is already initialized.");
     assertion(szDumpFilePath != nullptr && "Invalid dump file path");
     assertion(iAsmDumpRangeinBytes > 0 && "Invalid assembly dump range");
     assertion(iAsmDumpRangeinBytes < 0x1000 && "Too big dump range");
+    assertion(iStringDumpSize >= 0 && "Invalid string dump size. Must be more than 0");
 
 
-    m_iAsmDumpRange = iAsmDumpRangeinBytes;
+    m_iStringDumpSize = iStringDumpSize;
+    m_iAsmDumpRange   = iAsmDumpRangeinBytes;
 
 
     // Starting up submodules...
@@ -115,4 +117,12 @@ const std::string& DeadStop_t::GetDumpFilePath() const
 int DeadStop_t::GetAsmDumpRange() const
 {
     return m_iAsmDumpRange;
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+int DeadStop_t::GetStringDumpSize() const
+{
+    return m_iStringDumpSize;
 }

@@ -95,6 +95,7 @@ void DeadStop::MasterSignalHandler(int iSignalID, siginfo_t* pSigInfo, void* pCo
     DoBranding(hFile); hFile << "Fatal signal received, this program will terminate now.\n";
     DoBranding(hFile); hFile << "Starting log dump @ ";
     DumpDateTime(hFile);
+    hFile << '\n';
 
 
     // Getting "this" process's memory regions.
@@ -135,6 +136,11 @@ void DeadStop::MasterSignalHandler(int iSignalID, siginfo_t* pSigInfo, void* pCo
     else
         FAIL_LOG("Failed to dump assembly to crash logs.");
 
+
+    DoBranding(hFile); hFile << "Log dump ended @ ";
+    DumpDateTime(hFile);
+    hFile << '\n';
+    hFile << "///////////////////////////////////////////////////////////////////////////\n";
 
     hFile.close();
     exit(1);
@@ -477,13 +483,24 @@ static bool DeadStop::GenerateDasmOutput(
         if(iInstAdrs - iTotalBytes == pCrashLocation)
             ssOut << "  <--[ crashed here ]";
 
+
         // Finding potential string pointer in this instruction.
         const char* szPotentialString = FindInstPointerToString(*pInst, iInstAdrs - iTotalBytes, pContext, vecValidMemRegions);
         if(szPotentialString != nullptr)
         {
             ssOut << " ; ";
-            for(int i = 0; i < 5; i++)
-                ssOut << szPotentialString[i];
+
+            // Checking if we can read 20 bytes of this potential string.
+            int iCharsToRead = DeadStop_t::GetInstance().GetStringDumpSize();
+
+            if(IsMemoryRegionRedable(vecValidMemRegions, 
+                        MemRegion_t(reinterpret_cast<uintptr_t>(szPotentialString), reinterpret_cast<uintptr_t>(szPotentialString + iCharsToRead))) == true)
+            {
+                for(int i = 0; i < iCharsToRead && szPotentialString[i] != '\0'; i++)
+                {
+                    ssOut << szPotentialString[i];
+                }
+            }
         }
 
 
@@ -505,7 +522,7 @@ static bool DeadStop::GenerateDasmOutput(
 ///////////////////////////////////////////////////////////////////////////
 static bool DeadStop::IsMemoryRegionRedable(const std::vector<MemRegion_t>& vecValidMemRegions, const MemRegion_t& targetRegion)
 {
-    assertion(targetRegion.m_iStart < targetRegion.m_iEnd && "Invalid Memory Region");
+    assertion(targetRegion.m_iStart <= targetRegion.m_iEnd && "Invalid Memory Region");
 
     // NOTE : MemRegion_t.m_iEnd can't be accessed.
     for(const MemRegion_t& memRegion : vecValidMemRegions)
@@ -567,13 +584,6 @@ static const char* DeadStop::FindInstPointerToString(
     {
         if(pLegacyInst->ModRM_RM() != 0b100)
         {
-            intptr_t iBaseReg =
-                static_cast<intptr_t>(pContext->uc_mcontext.gregs[s_regIndexToEnum[pLegacyInst->ModRM_RM()]]);
-
-
-            // Register holds to BS memory adrs?
-            if(IsMemoryRegionRedable(vecValidMemRegions, MemRegion_t(iBaseReg - 1, iBaseReg + 1)) == false)
-                return nullptr;
 
             // Get the displacement value if there are any displacement bytes.
             // NOTE : Doing it this way assures that endians are handled correctly.
@@ -589,8 +599,8 @@ static const char* DeadStop::FindInstPointerToString(
             }
 
 
-            if(pLegacyInst->ModRM_Mod() != 0b11)
-                iBaseReg = *reinterpret_cast<intptr_t*>(iBaseReg);
+            intptr_t iBaseReg =
+                static_cast<intptr_t>(pContext->uc_mcontext.gregs[s_regIndexToEnum[pLegacyInst->ModRM_RM()]]);
 
 
             // Incase of mod == 00 & rm = 101, we need to do : disp32 + RIP
@@ -598,18 +608,25 @@ static const char* DeadStop::FindInstPointerToString(
             {
                 iBaseReg = static_cast<intptr_t>(iStartAdrs) + static_cast<intptr_t>(iInstLengthInBytes);
             }
-
-
-            // Register is pointing to BS memory adrs?
-            if(IsMemoryRegionRedable(vecValidMemRegions, MemRegion_t(iBaseReg - 1, iBaseReg + 1)) == false)
+            else if(pLegacyInst->ModRM_Mod() != 0b11)
             {
-                FAIL_LOG("Base reg [ %p ] not redable", iBaseReg);
-                return nullptr;
+                // Register holds to BS memory adrs?
+                if(IsMemoryRegionRedable(vecValidMemRegions, MemRegion_t(iBaseReg - 1, iBaseReg + 1)) == false)
+                    return nullptr;
+
+                iBaseReg = *reinterpret_cast<intptr_t*>(iBaseReg);
             }
+
+
+            // Base register is pointing at valid memory address or not?
+            if(IsMemoryRegionRedable(vecValidMemRegions, MemRegion_t(iBaseReg - 1, iBaseReg + 1)) == false)
+                return nullptr;
 
 
             // Final adrs...
             szFinalPointer = reinterpret_cast<const char*>(iBaseReg + iDisplacement);
+
+            WIN_LOG("Found a potential string pointer [ %p ]", szFinalPointer);
         }
         else
         {
@@ -658,6 +675,8 @@ static const char* DeadStop::FindInstPointerToString(
             iScaleReg *= static_cast<intptr_t>(s_iScaleRegMult[pLegacyInst->SIB_Scale()]);
 
             szFinalPointer = reinterpret_cast<const char*>(iBaseReg + iScaleReg + iDisplacement);
+
+            WIN_LOG("Found valid potential string pointer using SIB byte LEA. @ %p", szFinalPointer);
         }
     }
 
@@ -823,9 +842,8 @@ static void DeadStop::DumpDateTime(std::fstream& hFile)
     // Writting time.
     hFile << " Time { " 
         << localTime->tm_hour % 12 << ':' 
-        << localTime->tm_min << ':' 
-        << localTime->tm_sec << " "
+        << std::setw(2) << std::setfill('0') <<localTime->tm_min << ':' 
+        << std::setw(2) << std::setfill('0') <<localTime->tm_sec << " "
         << (localTime->tm_hour >= 12 ? "PM" : "AM")
-        << " }";
-    hFile << std::endl;
+        << " }" << std::setfill(' ');
 }
