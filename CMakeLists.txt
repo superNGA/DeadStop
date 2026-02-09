@@ -45,6 +45,8 @@ add_executable(DeadStop
 
 )
 
+target_compile_options(DeadStop PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fomit-frame-pointer>)
+
 target_link_libraries(DeadStop PRIVATE INSANE_DisassemblerAMD64)
 
 target_compile_features(DeadStop PRIVATE cxx_std_17)

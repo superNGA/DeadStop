@@ -46,13 +46,18 @@ namespace DEADSTOP_NAMESPACE
     siginfo_t*         g_pSigInfo = nullptr;
     ucontext_t*        g_pContext = nullptr;
 
+    // To get the REG enum value corrosponding to modrm_rm or modrm_reg anything intel.
+    static int s_regIndexToEnum[] = { REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RBP, REG_RSI, REG_RDI, 
+        REG_R8, REG_R9, REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15 };
 
 
     static bool DumpAssembly(std::fstream& hFile, int iSignalID, int iAsmDumpRangeInBytes);
     static bool GenerateDasmOutput(std::stringstream& ssOut, uintptr_t iStartAdrs, const std::vector<InsaneDASM64::Byte>& vecBytes, uintptr_t pCrashLocation);
-    static const char* FindInstPointerToString(InsaneDASM64::Instruction_t& inst, uintptr_t iStartAdrs);
+    static void* GetPointerFromModrm(InsaneDASM64::Instruction_t& inst, uintptr_t iStartAdrs);
+    static void* GetPointerFromModrm(InsaneDASM64::Legacy::LegacyInst_t* pLegacyInst, uintptr_t iStartAdrs);
     static bool Analyze();
     static uintptr_t GetReturnAdrs(uintptr_t iStartPos);
+    static bool CaseInsensitiveStringMatch(const char* szString1, const char* szString2);
 
     // Write to File.
     static void WriteSelfMaps       (std::fstream& hFile);
@@ -127,7 +132,14 @@ void DeadStop::MasterSignalHandler(int iSignalID, siginfo_t* pSigInfo, void* pCo
     Analyze();
 
     hFile << "\n\n";
-    // bool bAsmDumpWin = DumpAssembly(hFile, iSignalID, DeadStop_t::GetInstance().GetAsmDumpRange());
+    if(DumpAssembly(hFile, iSignalID, DeadStop_t::GetInstance().GetAsmDumpRange()) == true)
+    {
+        WIN_LOG("Disassembly writting done successfully.");
+    }
+    else
+    {
+        FAIL_LOG("Disassembly writting failed.");
+    }
 
 
     // Epilogue
@@ -500,7 +512,8 @@ static bool DeadStop::GenerateDasmOutput(
 
 
         // Finding potential string pointer in this instruction.
-        const char* szPotentialString = FindInstPointerToString(*pInst, iInstAdrs - iTotalBytes);
+        const char* szPotentialString = reinterpret_cast<const char*>(GetPointerFromModrm(*pInst, iInstAdrs - iTotalBytes));
+
         if(szPotentialString != nullptr)
         {
             ssOut << " ; ";
@@ -535,143 +548,132 @@ static bool DeadStop::GenerateDasmOutput(
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
-static const char* DeadStop::FindInstPointerToString(InsaneDASM64::Instruction_t& inst, uintptr_t iStartAdrs)
+static void* DeadStop::GetPointerFromModrm(InsaneDASM64::Instruction_t& inst, uintptr_t iStartAdrs)
 {
-    // In this function we will try to extract any poitners for some specific decoded instructions, 
-    // and check if they point to some valid string in our processes memory region.
-    //
-    // Only LEA and legacy instructions with an 8 byte immediate, will be considered as potentially
-    // "usefull".
-    //
-    // Fail output is nullptr, valid output is pointer to the string ( check against processes boundaries ).
     if(inst.m_iInstEncodingType != InsaneDASM64::Instruction_t::InstEncodingType_Legacy)
         return nullptr;
 
+    return GetPointerFromModrm(reinterpret_cast<InsaneDASM64::Legacy::LegacyInst_t*>(inst.m_pInst), iStartAdrs);
+}
 
-    InsaneDASM64::Legacy::LegacyInst_t* pLegacyInst = reinterpret_cast<InsaneDASM64::Legacy::LegacyInst_t*>(inst.m_pInst);
-    int iInstLengthInBytes = 0; // instruction length in bytes.
-    {
-        iInstLengthInBytes += pLegacyInst->m_legacyPrefix.m_nPrefix;
-        iInstLengthInBytes += pLegacyInst->m_bHasREX == true ? 1 : 0;
-        iInstLengthInBytes += pLegacyInst->m_opCode.m_nOpBytes;
-        iInstLengthInBytes += pLegacyInst->m_bHasModRM == true ? 1 : 0;
-        iInstLengthInBytes += pLegacyInst->m_bHasSIB == true ? 1 : 0;
-        iInstLengthInBytes += pLegacyInst->m_displacement.ByteCount();
-        iInstLengthInBytes += pLegacyInst->m_immediate.ByteCount();
-    }
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+static void* DeadStop::GetPointerFromModrm(InsaneDASM64::Legacy::LegacyInst_t* pLegacyInst, uintptr_t iStartAdrs)
+{
+    int iInstLengthInBytes = pLegacyInst->GetInstLengthInBytes(); // instruction length in bytes.
 
     if(pLegacyInst->m_opCode.m_pOpCodeDesc == nullptr)
         return nullptr;
 
-
-    // To get the REG enum value corrosponding to modrm_rm or modrm_reg anything intel.
-    static int s_regIndexToEnum[] = { REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RBP, REG_RSI, REG_RDI, 
-        REG_R8, REG_R9, REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15 };
+    if(pLegacyInst->m_bHasModRM == false)
+        return nullptr;
 
 
     // We will check this location for a valid string after filling it up.
-    const char* szFinalPointer = nullptr;
+    void* szFinalPointer = nullptr;
 
 
     // We have a LEA instruction.
-    if(strcmp(pLegacyInst->m_opCode.m_pOpCodeDesc->m_szName, "LEA") == 0)
+    if(pLegacyInst->ModRM_RM() != 0b100)
     {
-        if(pLegacyInst->ModRM_RM() != 0b100)
+
+        // Get the displacement value if there are any displacement bytes.
+        // NOTE : Doing it this way assures that endians are handled correctly.
+        int32_t iDisplacement = 0;
+        switch(pLegacyInst->m_displacement.ByteCount())
         {
+            // Single byte displacement. No need to worry about endians.
+            case 1: iDisplacement = static_cast<int32_t>(static_cast<int8_t>(pLegacyInst->m_displacement.m_iDispBytes[0])); break;
+            case 2: iDisplacement = static_cast<int32_t>(*reinterpret_cast<int16_t*>(&pLegacyInst->m_displacement.m_iDispBytes[0])); break;
+            case 4: iDisplacement = *reinterpret_cast<int32_t*>(&pLegacyInst->m_displacement.m_iDispBytes[0]); break;
 
-            // Get the displacement value if there are any displacement bytes.
-            // NOTE : Doing it this way assures that endians are handled correctly.
-            int32_t iDisplacement = *reinterpret_cast<int32_t*>(&pLegacyInst->m_displacement.m_iDispBytes[0]);
-            switch(pLegacyInst->m_displacement.ByteCount())
-            {
-                // Single byte displacement. No need to worry about endians.
-                case 1: iDisplacement &= 0xFF; break;
-                case 2: iDisplacement &= 0xFFFF; break;
-                case 4: iDisplacement &= 0xFFFFFFFF; break;
-
-                default: iDisplacement = 0; break;
-            }
+            default: iDisplacement = 0; break;
+        }
 
 
-            intptr_t iBaseReg =
-                static_cast<intptr_t>(g_pContext->uc_mcontext.gregs[s_regIndexToEnum[pLegacyInst->ModRM_RM()]]);
+        intptr_t iBaseReg =
+            static_cast<intptr_t>(g_pContext->uc_mcontext.gregs[s_regIndexToEnum[pLegacyInst->ModRM_RM()]]);
 
 
-            // Incase of mod == 00 & rm = 101, we need to do : disp32 + RIP
-            if(pLegacyInst->ModRM_Mod() == 0b00 && pLegacyInst->ModRM_RM() == 0b101)
-            {
-                iBaseReg = static_cast<intptr_t>(iStartAdrs) + static_cast<intptr_t>(iInstLengthInBytes);
-            }
-            else if(pLegacyInst->ModRM_Mod() != 0b11)
-            {
-                // Register holds to BS memory adrs?
-                if(g_memRegionHandler.HasParentRegion(iBaseReg) == false)
-                    return nullptr;
-
-                iBaseReg = *reinterpret_cast<intptr_t*>(iBaseReg);
-            }
-
-
-            // Base register is pointing at valid memory address or not?
+        // Incase of mod == 00 & rm = 101, we need to do : disp32 + RIP
+        if(pLegacyInst->ModRM_Mod() == 0b00 && pLegacyInst->ModRM_RM() == 0b101)
+        {
+            iBaseReg = static_cast<intptr_t>(iStartAdrs) + static_cast<intptr_t>(iInstLengthInBytes);
+        }
+        else if(pLegacyInst->ModRM_Mod() != 0b11)
+        {
+            // Register holds to BS memory adrs?
             if(g_memRegionHandler.HasParentRegion(iBaseReg) == false)
                 return nullptr;
 
-
-            // Final adrs...
-            szFinalPointer = reinterpret_cast<const char*>(iBaseReg + iDisplacement);
-
-            WIN_LOG("Found a potential string pointer [ %p ]", szFinalPointer);
+            iBaseReg = *reinterpret_cast<intptr_t*>(iBaseReg);
         }
-        else
+
+
+        // Base register is pointing at valid memory address or not?
+        if(g_memRegionHandler.HasParentRegion(iBaseReg) == false)
+            return nullptr;
+
+
+        // Final adrs...
+        szFinalPointer = reinterpret_cast<void*>(iBaseReg + iDisplacement);
+
+        WIN_LOG("Found a potential string pointer [ %p ]", szFinalPointer);
+    }
+    else if(pLegacyInst->m_bHasSIB == true)
+    {
+        intptr_t iBaseReg  = 
+            static_cast<intptr_t>(g_pContext->uc_mcontext.gregs[s_regIndexToEnum[pLegacyInst->SIB_Scale()]]);
+        intptr_t iScaleReg =
+            static_cast<intptr_t>(g_pContext->uc_mcontext.gregs[s_regIndexToEnum[pLegacyInst->SIB_Index()]]);
+
+
+        // Get the displacement value if there are any displacement bytes.
+        // NOTE : Doing it this way assures that endians are handled correctly.
+        int32_t iDisplacement = *reinterpret_cast<int32_t*>(&pLegacyInst->m_displacement.m_iDispBytes[0]);
+        switch(pLegacyInst->m_displacement.ByteCount())
         {
-            intptr_t iBaseReg  = 
-                static_cast<intptr_t>(g_pContext->uc_mcontext.gregs[s_regIndexToEnum[pLegacyInst->SIB_Scale()]]);
-            intptr_t iScaleReg =
-                static_cast<intptr_t>(g_pContext->uc_mcontext.gregs[s_regIndexToEnum[pLegacyInst->SIB_Index()]]);
+            // Single byte displacement. No need to worry about endians.
+            case 1: iDisplacement &= 0xFF; break;
+            case 2: iDisplacement &= 0xFFFF; break;
+            case 4: iDisplacement &= 0xFFFFFFFF; break;
 
-
-            // Get the displacement value if there are any displacement bytes.
-            // NOTE : Doing it this way assures that endians are handled correctly.
-            int32_t iDisplacement = *reinterpret_cast<int32_t*>(&pLegacyInst->m_displacement.m_iDispBytes[0]);
-            switch(pLegacyInst->m_displacement.ByteCount())
-            {
-                // Single byte displacement. No need to worry about endians.
-                case 1: iDisplacement &= 0xFF; break;
-                case 2: iDisplacement &= 0xFFFF; break;
-                case 4: iDisplacement &= 0xFFFFFFFF; break;
-
-                default: iDisplacement = 0; break;
-            }
-
-
-            // Scale register...
-            if(pLegacyInst->SIB_Index() == 0b100)
-                iScaleReg = 0;
-
-
-            // Base register...
-            if(pLegacyInst->SIB_Base() == 0b101)
-            {
-                iBaseReg = 0;
-
-                if(pLegacyInst->ModRM_Mod() == 0b01)
-                {
-                    iBaseReg       = static_cast<intptr_t>(g_pContext->uc_mcontext.gregs[REG_RBP]);
-                    iDisplacement &= 0xFF;
-                }
-                else if(pLegacyInst->ModRM_Mod() == 0b10)
-                {
-                    iBaseReg = static_cast<intptr_t>(g_pContext->uc_mcontext.gregs[REG_RBP]);
-                }
-            }
-
-            static int s_iScaleRegMult[4] = {1, 2, 4, 8};
-            iScaleReg *= static_cast<intptr_t>(s_iScaleRegMult[pLegacyInst->SIB_Scale()]);
-
-            szFinalPointer = reinterpret_cast<const char*>(iBaseReg + iScaleReg + iDisplacement);
-
-            WIN_LOG("Found valid potential string pointer using SIB byte LEA. @ %p", szFinalPointer);
+            default: iDisplacement = 0; break;
         }
+
+
+        // Scale register...
+        if(pLegacyInst->SIB_Index() == 0b100)
+            iScaleReg = 0;
+
+
+        // Base register...
+        if(pLegacyInst->SIB_Base() == 0b101)
+        {
+            iBaseReg = 0;
+
+            if(pLegacyInst->ModRM_Mod() == 0b01)
+            {
+                iBaseReg       = static_cast<intptr_t>(g_pContext->uc_mcontext.gregs[REG_RBP]);
+                iDisplacement &= 0xFF;
+            }
+            else if(pLegacyInst->ModRM_Mod() == 0b10)
+            {
+                iBaseReg = static_cast<intptr_t>(g_pContext->uc_mcontext.gregs[REG_RBP]);
+            }
+        }
+
+        static int s_iScaleRegMult[4] = {1, 2, 4, 8};
+        iScaleReg *= static_cast<intptr_t>(s_iScaleRegMult[pLegacyInst->SIB_Scale()]);
+
+        szFinalPointer = reinterpret_cast<void*>(iBaseReg + iScaleReg + iDisplacement);
+
+        WIN_LOG("Found a potential string pointer [ %p ]", szFinalPointer);
+    }
+    else 
+    {
+        FAIL_LOG("Found instruction with a modrm.rm = 100 and not SIB byte.");
     }
 
 
@@ -729,6 +731,7 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
     std::vector<InsaneDASM64::Instruction_t> vecInst;
 
 
+    int64_t iPushPopOffset = 0; // How much have Push & Pop instuctions moved RSP in between StartPos to RETN inst.
     uintptr_t iRetInstAdrs = 0;
     bool      bRetFound    = false;
     for(int i = 0; i < 100; i++)
@@ -763,7 +766,21 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
             switch (inst.m_iInstEncodingType) 
             {
                 case InsaneDASM64::Instruction_t::InstEncodingType_Legacy:
-                    iInstLength += reinterpret_cast<InsaneDASM64::Legacy::LegacyInst_t*>(inst.m_pInst)->GetInstLengthInBytes();
+                    {
+                        InsaneDASM64::Legacy::LegacyInst_t* pLegacyInst =
+                            reinterpret_cast<InsaneDASM64::Legacy::LegacyInst_t*>(inst.m_pInst);
+
+                        if(InsaneDASM64::Standard::OpCodeDesc_t* pOpcdDesc = pLegacyInst->m_opCode.m_pOpCodeDesc; pOpcdDesc != nullptr)
+                        {
+                            if(CaseInsensitiveStringMatch(pOpcdDesc->m_szName, "PUSH") == true)
+                                iPushPopOffset -= 8;
+                            else if(CaseInsensitiveStringMatch(pOpcdDesc->m_szName, "POP") == true)
+                                iPushPopOffset += 8;
+                        }
+
+
+                        iInstLength += pLegacyInst->GetInstLengthInBytes();
+                    }
                     break;
                 case InsaneDASM64::Instruction_t::InstEncodingType_VEX:
                     iInstLength += reinterpret_cast<InsaneDASM64::VEX::VEXInst_t*>(inst.m_pInst)->GetInstLengthInBytes();
@@ -772,7 +789,9 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
                     iInstLength += reinterpret_cast<InsaneDASM64::EVEX::EVEXInst_t*>(inst.m_pInst)->GetInstLengthInBytes();
                     break;
 
-                default: break;
+                    // Can happen for instructions whose full byte weren't feed.
+                case InsaneDASM64::Instruction_t::InstEncodingType_Invalid:
+                default: continue; break;
             }
             
 
@@ -813,7 +832,12 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
         return 0;
 
 
-    vecBytes.clear(); vecInst.clear();
+    LOG("A PushPop offset of [ %ld ] is determined", iPushPopOffset);
+
+
+    // Store fresh bytes, till RETN inst.
+    vecBytes.clear();
+    vecInst.clear();
     allocator.ResetAllArena();
     for(uintptr_t iBatchStart = qValidInstAdrs.front(); iBatchStart < qValidInstAdrs.back(); iBatchStart++)
         vecBytes.push_back(*reinterpret_cast<InsaneDASM64::Byte*>(iBatchStart));
@@ -825,30 +849,26 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
         return 0;
     }
 
-    std::vector<InsaneDASM64::DASMInst_t> vecOutput;
-    if(InsaneDASM64::Disassemble(vecInst, vecOutput) != InsaneDASM64::IDASMErrorCode_Success)
+    std::vector<InsaneDASM64::DASMInst_t> vecDasmInst;
+    if(InsaneDASM64::Disassemble(vecInst, vecDasmInst) != InsaneDASM64::IDASMErrorCode_Success)
     {
         FAIL_LOG("Theortically this can't fail, but I'm afraid this stands no chance against you.");
         return 0;
     }
 
+    assertion(vecInst.size() == vecDasmInst.size() && "Decoded & Disasembled instruction count doens't match.");
+    assertion(qValidInstAdrs.size() - 1 == vecDasmInst.size() && "Valid instruction addresses don't line up with disassembled inst count.");
+
+
     // Verifying decoding results. Final instruction in the output must be RETN
-    if(strcmp(vecOutput.back().m_szMnemonic, "RETN") != 0)
+    if(strcmp(vecDasmInst.back().m_szMnemonic, "RETN") != 0)
     {
-        FAIL_LOG("Expected a RETN statement @ the end. But got \"%s\"", vecOutput.back().m_szMnemonic);
-
-        // for(InsaneDASM64::DASMInst_t& inst : vecOutput)
-        // {
-        //     printf("%s", inst.m_szMnemonic);
-        //     for(int i = 0; i < inst.m_nOperands; i++) printf("%s, ", inst.m_szOperands[i]);
-        //     printf("\n");
-        // }
-
+        FAIL_LOG("Expected a RETN statement @ the end. But got \"%s\"", vecDasmInst.back().m_szMnemonic);
         return 0;
     }
 
 
-    for(InsaneDASM64::DASMInst_t& inst : vecOutput)
+    for(InsaneDASM64::DASMInst_t& inst : vecDasmInst)
     {
         printf("%s", inst.m_szMnemonic);
         for(int i = 0; i < inst.m_nOperands; i++) printf("%s, ", inst.m_szOperands[i]);
@@ -863,6 +883,7 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
     if(vecInst.size() <= 2)
         return 0;
 
+
     // second last instruction, right above RETN instruction.
     InsaneDASM64::Instruction_t* pMagicInst = &vecInst[vecInst.size() - 2];
 
@@ -870,26 +891,179 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
     if(pMagicInst->m_iInstEncodingType != InsaneDASM64::Instruction_t::InstEncodingType_Legacy)
         return 0;
 
-    // If this instrucion is "LEAVE" or "POP rbp", then stack frame is not omitted.
+
     InsaneDASM64::Legacy::LegacyInst_t* pSecondLastInst = 
         reinterpret_cast<InsaneDASM64::Legacy::LegacyInst_t*>(pMagicInst->m_pInst);
 
+    // If this instrucion is "LEAVE" or "POP rbp", then stack frame is not omitted.
     int  iInstLength = pSecondLastInst->GetInstLengthInBytes();
-    bool bLeaveInst  = iInstLength == 1 && pSecondLastInst->m_opCode.GetMostSignificantOpCode() == 0xC9;
-    bool bPopRBP     = iInstLength == 1 && pSecondLastInst->m_opCode.GetMostSignificantOpCode() == 0x5D;
+    bool bLeaveInst  = iInstLength == 1 && pSecondLastInst->m_opCode.GetMostSignificantOpCode() == 0xC9; // "LEAVE" inst
+    bool bPopRBP     = iInstLength == 1 && pSecondLastInst->m_opCode.GetMostSignificantOpCode() == 0x5D; // "POP rbp" inst
     bool bStackFrameOmitted = bLeaveInst == false && bPopRBP == false;
 
 
-    // TODO : Add safety check here.
-    // TODO : Understand all return paths n shit.
     if(bStackFrameOmitted == false)
     {
         WIN_LOG("Stack Frame Found");
-        return *reinterpret_cast<uintptr_t*>(static_cast<uintptr_t>(g_pContext->uc_mcontext.gregs[REG_RBP]) + 8);
+
+        uintptr_t pReturnAdrs = static_cast<uintptr_t>(g_pContext->uc_mcontext.gregs[REG_RBP]) + 8;
+        if(g_memRegionHandler.HasParentRegion(pReturnAdrs) == false)
+            return 0;
+
+        uintptr_t iReturnAdrs = *reinterpret_cast<uintptr_t*>(pReturnAdrs);
+        if(g_memRegionHandler.HasParentRegion(iReturnAdrs) == false)
+            return 0;
+
+        return iReturnAdrs;
+    }
+
+
+
+    // Stack frame omitted.
+    // Iterate from second last to front, and find the first instruction which
+    // modifies the rSP register. Should be the second inst itself in most cases.
+    InsaneDASM64::Legacy::LegacyInst_t* pStackRestoringInst = nullptr;
+    uintptr_t                           iAdrsStackRestoringInst = 0;
+    for(int iInstIndex = static_cast<int>(vecInst.size()) - 2; iInstIndex >= 0; iInstIndex--)
+    {
+        InsaneDASM64::DASMInst_t*    pDasmInst = &vecDasmInst[iInstIndex];
+        InsaneDASM64::Instruction_t* pInst     = &vecInst[iInstIndex];
+        uintptr_t                    iInstAdrs = qValidInstAdrs[iInstIndex];
+
+        // Break @ first rSP modifying instruction.
+        if(pInst->m_iInstEncodingType == InsaneDASM64::Instruction_t::InstEncodingType_Legacy)
+        {
+            if(pDasmInst->m_nOperands >= 1 && CaseInsensitiveStringMatch(pDasmInst->m_szOperands[0], "rsp") == true)
+            {
+                WIN_LOG("Found rsp modifying instruction.");
+                printf("--> %s  ", pDasmInst->m_szMnemonic);
+                for(int i = 0; i < pDasmInst->m_nOperands; i++) printf("%s, ", pDasmInst->m_szOperands[i]);
+                printf("\n");
+
+                pStackRestoringInst     = reinterpret_cast<InsaneDASM64::Legacy::LegacyInst_t*>(pInst->m_pInst);
+                iAdrsStackRestoringInst = iInstAdrs;
+                break;
+            }
+        }
+    }
+
+
+    // This function failed both "Normal Stack Frame" & "Omitte Stack Check"
+    // This function must be a leaf function, hence rsp is unchanged.
+    if(pStackRestoringInst == nullptr)
+        return static_cast<uintptr_t>(g_pContext->uc_mcontext.gregs[REG_RSP]);
+
+
+    if(pStackRestoringInst->m_opCode.m_pOpCodeDesc == nullptr)
+    {
+        FAIL_LOG("Stack restoring instruction for an omitted stack frame function is invalid.");
+        return 0;
+    }
+
+    // If stack restoring inst is a "LEA" instruction.
+    if(CaseInsensitiveStringMatch(pStackRestoringInst->m_opCode.m_pOpCodeDesc->m_szName, "LEA") == true)
+    {
+        uintptr_t pReturnAdrs = reinterpret_cast<uintptr_t>(GetPointerFromModrm(pStackRestoringInst, iAdrsStackRestoringInst));
+        if(g_memRegionHandler.HasParentRegion(pReturnAdrs) == false) // Failed to get return address. 
+            return 0;
+
+        uintptr_t iReturnAdrs = *reinterpret_cast<uintptr_t*>(pReturnAdrs);
+        if(g_memRegionHandler.HasParentRegion(iReturnAdrs) == false) // We got something, but it seems to be invalid.
+            return 0;
+
+        return iReturnAdrs;
+    }
+    else if(CaseInsensitiveStringMatch(pSecondLastInst->m_opCode.m_pOpCodeDesc->m_szName, "ADD") == true)
+    {
+        // just for ease of writting.
+        InsaneDASM64::Legacy::LegacyInst_t* pInst = pStackRestoringInst;
+
+        if(pInst->m_opCode.m_pOpCodeDesc->m_nOperands != 2)
+           return 0;
+
+        InsaneDASM64::Standard::OpCodeDesc_t* pOpcdDesc = pInst->m_opCode.m_pOpCodeDesc;
+
+        if(pOpcdDesc->m_operands[1].m_iOperandCatagory != InsaneDASM64::Standard::Operand_t::OperandCatagory_Legacy)
+            return 0;
+
+
+        // NOTE : I have checked and only these 3 types of operand addressing methods are 
+        // available for "ADD" instruction's second operand.
+        intptr_t iRSPOffset = 0;
+        if(pOpcdDesc->m_operands[1].m_iOperandMode == InsaneDASM64::Standard::OperandMode_G)
+        {
+            if(pInst->m_bHasModRM == false)
+                return 0;
+
+            iRSPOffset = g_pContext->uc_mcontext.gregs[s_regIndexToEnum[pInst->ModRM_Reg()]];
+        }
+        else if(pOpcdDesc->m_operands[1].m_iOperandMode == InsaneDASM64::Standard::OperandMode_E)
+        {
+            iRSPOffset = reinterpret_cast<intptr_t>(GetPointerFromModrm(pInst, iAdrsStackRestoringInst));
+        }
+        else if(pOpcdDesc->m_operands[1].m_iOperandMode == InsaneDASM64::Standard::OperandMode_I)
+        {
+            int64_t iImmediate = 0; // *reinterpret_cast<int64_t*>(&pInst->m_immediate.m_immediateByte[0]);
+            switch(pInst->m_immediate.ByteCount())
+            {
+                // Single byte displacement. No need to worry about endians.
+                case 1: iImmediate = static_cast<intptr_t>(static_cast<int8_t>(pInst->m_immediate.m_immediateByte[0])); break;
+                case 2: iImmediate = static_cast<intptr_t>(*reinterpret_cast<int16_t*>(&pInst->m_immediate.m_immediateByte[0])); break;
+                case 4: iImmediate = static_cast<intptr_t>(*reinterpret_cast<int32_t*>(&pInst->m_immediate.m_immediateByte[0])); break;
+                case 8: iImmediate = *reinterpret_cast<intptr_t*>(&pInst->m_immediate.m_immediateByte[0]); break;
+
+                default: iImmediate = 0; break;
+            }
+
+            iRSPOffset = iImmediate;
+        }
+
+
+        uintptr_t pReturnAdrs = g_pContext->uc_mcontext.gregs[REG_RSP] + iRSPOffset + iPushPopOffset;
+        if(g_memRegionHandler.HasParentRegion(pReturnAdrs) == false) // Failed to get return address. 
+            return 0;
+
+        uintptr_t iReturnAdrs = *reinterpret_cast<uintptr_t*>(pReturnAdrs);
+        if(g_memRegionHandler.HasParentRegion(iReturnAdrs) == false) // We got something, but it seems to be invalid.
+            return 0;
+
+
+        return iReturnAdrs;
     }
 
 
     return 0;
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+static bool DeadStop::CaseInsensitiveStringMatch(const char* szString1, const char* szString2)
+{
+    if(szString1 == szString2)
+        return true;
+
+    if(szString1 == nullptr ||szString2 == nullptr)
+        return false;
+
+    while(*szString1 != 0 && *szString2 != 0)
+    {
+        char c1 = *szString1++;
+        char c2 = *szString2++;
+
+        // lower case all
+        if(c1 >= 'A' && c1 <= 'Z')
+            c1 = c1 - 'A' + 'a';
+
+        // lower case all
+        if(c2 >= 'A' && c2 <= 'Z')
+            c2 = c2 - 'A' + 'a';
+
+        if(c1 != c2)
+            return false;
+    }
+
+    return *szString1 == 0 && *szString2 == 0;
 }
 
     
