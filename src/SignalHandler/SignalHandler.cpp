@@ -46,24 +46,36 @@ namespace DEADSTOP_NAMESPACE
     siginfo_t*         g_pSigInfo = nullptr;
     ucontext_t*        g_pContext = nullptr;
 
-    // To get the REG enum value corrosponding to modrm_rm or modrm_reg anything intel.
+
+    // Table to get ModRM.RM or ModRM.Reg to ucontext_t register index.
     static int s_regIndexToEnum[] = { REG_RAX, REG_RCX, REG_RDX, REG_RBX, REG_RBP, REG_RSI, REG_RDI, 
         REG_R8, REG_R9, REG_R10, REG_R11, REG_R12, REG_R13, REG_R14, REG_R15 };
 
 
-    static bool DumpAssembly(std::fstream& hFile, int iSignalID, int iAsmDumpRangeInBytes);
-    static bool GenerateDasmOutput(std::stringstream& ssOut, uintptr_t iStartAdrs, const std::vector<InsaneDASM64::Byte>& vecBytes, uintptr_t pCrashLocation);
+    // Generate formatted assembly instructions around a memory address.
+    static bool DumpAssembly(std::fstream& hFile, uintptr_t pPivotLocation, int iAsmDumpRangeInBytes, const char* szRipMsg = nullptr);
+    static bool GenerateDasmOutput( // This is a internal function used by DumpAssembly ( above ).
+            std::stringstream& ssOut, uintptr_t iStartAdrs, const std::vector<InsaneDASM64::Byte>& vecBytes, uintptr_t pCrashLocation, const char* szRipMsg);
+
     static void* GetPointerFromModrm(InsaneDASM64::Instruction_t& inst, uintptr_t iStartAdrs);
     static void* GetPointerFromModrm(InsaneDASM64::Legacy::LegacyInst_t* pLegacyInst, uintptr_t iStartAdrs);
-    static bool Analyze();
-    static uintptr_t GetReturnAdrs(uintptr_t iStartPos);
+
+    // Call stack analysis.
+    static bool Analyze(std::vector<uintptr_t>& vecCallStack);
+    static bool WriteFnChainToFile(std::fstream& hFile, const std::vector<uintptr_t>& vecCallStack);
+    static uintptr_t GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& allocator);
+
+    // String Utility.
     static bool CaseInsensitiveStringMatch(const char* szString1, const char* szString2);
+    static bool IsCharPrintable(char c);
 
     // Write to File.
     static void WriteSelfMaps       (std::fstream& hFile);
     static void DumpGeneralRegisters(std::fstream& hFile);
     static void DumpDateTime        (std::fstream& hFile);
     static void DoBranding          (std::fstream& hFile);
+    static void StartBanner         (std::fstream& hFile, const char* szMsg);
+    static void EndBanner           (std::fstream& hFile, const char* szMsg);
 }
 
 
@@ -90,6 +102,21 @@ void DeadStop::MasterSignalHandler(int iSignalID, siginfo_t* pSigInfo, void* pCo
     DoBranding(hFile); hFile << "Starting log dump @ ";
     DumpDateTime(hFile);
     hFile << '\n';
+
+
+    // Write the signal ID.
+    switch(iSignalID)
+    {
+        case SIGSEGV:  DoBranding(hFile); hFile << "Signal received [ SIGSEGV ] i.e. Segfault\n";                        break;
+        case SIGILL:   DoBranding(hFile); hFile << "Signal received [ SIGILL ] i.e. Invalid Instruction\n";              break;
+        case SIGTRAP:  DoBranding(hFile); hFile << "Signal Received [ SIGTRAP ] i.e. Trap Debugger\n";                   break;
+        case SIGABRT:  DoBranding(hFile); hFile << "Signal Received [ SIGABRT ] i.e. abort()\n";                         break; 
+        case SIGFPE:   DoBranding(hFile); hFile << "Signal Received [ SIGFPE ] i.e. Devide By Zero\n";                   break;  
+        case SIGBUS:   DoBranding(hFile); hFile << "Signal Received [ SIGBUS ] i.e. Hardware memory error, bad mmap.\n"; break; 
+
+        default: assertion(false && "Invalid signal ID"); return;
+    }
+    hFile << "\n\n";
     /* Prologue ends here */
 
 
@@ -99,47 +126,26 @@ void DeadStop::MasterSignalHandler(int iSignalID, siginfo_t* pSigInfo, void* pCo
 
     // Getting "this" process's memory regions.
     std::vector<MemRegion_t> vecSelfMaps; 
-    if(g_memRegionHandler.InitializeFromFile("/proc/self/maps") == false) // Must not fail.
+    if(g_memRegionHandler.InitializeFromFile("/proc/self/maps") == false)
     {
         DoBranding(hFile); hFile << "Failed to open \"/proc/self/maps\". Cannot proceed any further.\n";
         return;
     }
     WriteSelfMaps(hFile);
     WIN_LOG("Got processes memory regions.");
-
-
-
-    // Write the signal ID.
-    switch(iSignalID)
-    {
-        case SIGSEGV:  DoBranding(hFile); hFile << "Signal received [ SIGSEGV ] i.e. Segfault\n"; break;
-        case SIGILL:   DoBranding(hFile); hFile << "Signal received [ SIGILL ] i.e. Invalid Instruction\n"; break;
-        case SIGTRAP:  DoBranding(hFile); hFile << "Signal Received [ SIGTRAP ] i.e. Trap Debugger\n"; break;
-        case SIGABRT:  DoBranding(hFile); hFile << "Signal Received [ SIGABRT ] i.e. abort()\n"; break; 
-        case SIGFPE:   DoBranding(hFile); hFile << "Signal Received [ SIGFPE ] i.e. Devide By Zero\n"; break;  
-        case SIGBUS:   DoBranding(hFile); hFile << "Signal Received [ SIGBUS ] i.e. Hardware memory error, bad mmap.\n"; break; 
-
-        default: assertion(false && "Invalid signal ID"); return;
-    }
-
-
-    // Dump all general purpose registers with their values.
     hFile << "\n\n";
+
+
+    // GPR values -> file.
     DumpGeneralRegisters(hFile);
     WIN_LOG("Dumped registers.");
-
-
-    Analyze();
-
     hFile << "\n\n";
-    if(DumpAssembly(hFile, iSignalID, DeadStop_t::GetInstance().GetAsmDumpRange()) == true)
-    {
-        WIN_LOG("Disassembly writting done successfully.");
-    }
-    else
-    {
-        FAIL_LOG("Disassembly writting failed.");
-    }
+
+
+    std::vector<uintptr_t> vecCallStack;
+    Analyze(vecCallStack);
+
+    WriteFnChainToFile(hFile, vecCallStack);
 
 
     // Epilogue
@@ -162,7 +168,7 @@ static void DeadStop::WriteSelfMaps(std::fstream& hFile)
     if(hMaps.is_open() == false)
         return;
 
-    hFile << "------------------------------- Mapped Memory Regoins -------------------------------\n";
+    StartBanner(hFile, "Mapped Memory Regions");
 
     std::string szLine;
     while(std::getline(hMaps, szLine))
@@ -170,7 +176,7 @@ static void DeadStop::WriteSelfMaps(std::fstream& hFile)
         hFile << szLine << std::endl;
     }
 
-    hFile << "-------------------------------------------------------------------------------------\n\n\n";
+    EndBanner(hFile, "Mapped Memory Regions");
 
     hMaps.close();
     return;
@@ -179,41 +185,32 @@ static void DeadStop::WriteSelfMaps(std::fstream& hFile)
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
-static bool DeadStop::DumpAssembly(std::fstream& hFile, int iSignalID, int iAsmDumpRangeInBytes)
+static bool DeadStop::DumpAssembly(std::fstream& hFile, uintptr_t pPivotLocation, int iAsmDumpRangeInBytes, const char* szRipMsg)
 {
-    uintptr_t pCrashLocation = static_cast<uintptr_t>(g_pContext->uc_mcontext.gregs[REG_RIP]);
-
-
     // Does the crash location belong to the process?
-    MemRegion_t memRegionCrashLoc(pCrashLocation - 10, pCrashLocation + 10);
-    if(g_memRegionHandler.HasParentRegion(pCrashLocation) == false)
+    if(g_memRegionHandler.HasParentRegion(pPivotLocation) == false)
     {
-        FAIL_LOG("Crash location [ %p ] is not a redable memory location. Cannot dump crash logs.", pCrashLocation);
+        FAIL_LOG("Crash location [ %p ] is not a redable memory location. Cannot dump crash logs.", pPivotLocation);
         return false;
     }
 
 
-    assertion(pCrashLocation > iAsmDumpRangeInBytes && "Invalid dump range or crash location?");
+    assertion(pPivotLocation > iAsmDumpRangeInBytes && "Invalid dump range or crash location?");
     assertion(iAsmDumpRangeInBytes > 0 && iAsmDumpRangeInBytes < 0x1000 && "invalid or Too big dump range");
-    uintptr_t iAsmDumpStart = pCrashLocation - iAsmDumpRangeInBytes;
-    uintptr_t iAsmDumpEnd   = pCrashLocation + iAsmDumpRangeInBytes;
+    uintptr_t iAsmDumpStart = pPivotLocation - iAsmDumpRangeInBytes;
+    uintptr_t iAsmDumpEnd   = pPivotLocation + iAsmDumpRangeInBytes;
     if(g_memRegionHandler.HasParentRegion(iAsmDumpStart, iAsmDumpEnd) == false)
     {
         hFile << "Some parts of the dump regions [ " << 
             std::hex << iAsmDumpStart << " - " << iAsmDumpEnd << 
             " ] can't be read, reducing dump region to 100 byte above & below\n";
 
-        FAIL_LOG("Some parts of the dump regions [ 0x%016llX - 0x%016llX ] can't be read, reducing dump region to 100 byte above & below",
-                iAsmDumpStart, iAsmDumpEnd);
 
-
-        // Incase the initial memory region was smaller than 100 bytes and even
-        // that wasn't in the process's memory, then no point in rechecking, something 
-        // is fucked up real bad. Just leave now.
         if(iAsmDumpRangeInBytes > 100)
         {
-            iAsmDumpStart = static_cast<intptr_t>(pCrashLocation) - 100; 
-            iAsmDumpEnd   = pCrashLocation + 100;
+            iAsmDumpRangeInBytes = 100;
+            iAsmDumpStart        = pPivotLocation - iAsmDumpRangeInBytes; 
+            iAsmDumpEnd          = pPivotLocation + iAsmDumpRangeInBytes;
         }
         
 
@@ -233,22 +230,22 @@ static bool DeadStop::DumpAssembly(std::fstream& hFile, int iSignalID, int iAsmD
 
     // Collecting some bytes from crash location to disassembler.
     std::vector<InsaneDASM64::Byte> vecBytes;
-    for(int i = -iAsmDumpRange; i < iAsmDumpRange; i++)
-        vecBytes.push_back(*(reinterpret_cast<InsaneDASM64::Byte*>(pCrashLocation) + i));
+    for(int i = -iAsmDumpRange; i < iAsmDumpRange; i++) // unary minus ( - ) operator.
+        vecBytes.push_back(*(reinterpret_cast<InsaneDASM64::Byte*>(pPivotLocation) + i));
 
 
-    constexpr size_t MAX_DISASSEMBLING_ATTEMPS = 10;
+    constexpr size_t  MAX_DISASSEMBLING_ATTEMPS = 10;
     std::stringstream ssDasmOutput;
-    bool bDasmSucceded = false;
+    bool              bDasmSucceded = false;
     for(int iAttempt = 0; iAttempt < MAX_DISASSEMBLING_ATTEMPS; iAttempt++)
     {
         // Address of the first instruction.
         uintptr_t iStartAdrs = static_cast<uintptr_t>(
-            static_cast<intptr_t>(pCrashLocation) - static_cast<intptr_t>(iAsmDumpRange) + static_cast<intptr_t>(iAttempt));
+            static_cast<intptr_t>(pPivotLocation) - static_cast<intptr_t>(iAsmDumpRange) + static_cast<intptr_t>(iAttempt));
 
 
         ssDasmOutput.clear(); ssDasmOutput.str("");
-        if(GenerateDasmOutput(ssDasmOutput, iStartAdrs, vecBytes, pCrashLocation) == true)
+        if(GenerateDasmOutput(ssDasmOutput, iStartAdrs, vecBytes, pPivotLocation, szRipMsg) == true)
         {
             WIN_LOG("Disassembly verified.");
             bDasmSucceded = true;
@@ -267,7 +264,7 @@ static bool DeadStop::DumpAssembly(std::fstream& hFile, int iSignalID, int iAsmD
     // We failed all disassembling attempts?
     if(bDasmSucceded == false)
     {
-        DoBranding(hFile); hFile << "Disasesmlby Failed.\n";
+        DoBranding(hFile); hFile << "Disassembly Failed.\n";
         return false;
     }
 
@@ -280,7 +277,7 @@ static bool DeadStop::DumpAssembly(std::fstream& hFile, int iSignalID, int iAsmD
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
 static bool DeadStop::GenerateDasmOutput(
-        std::stringstream& ssOut, uintptr_t iStartAdrs, const std::vector<InsaneDASM64::Byte>& vecBytes, uintptr_t pCrashLocation)
+        std::stringstream& ssOut, uintptr_t iStartAdrs, const std::vector<InsaneDASM64::Byte>& vecBytes, uintptr_t pCrashLocation, const char* szRipMsg)
 {
     // Decoder & Disassembler.
     std::vector<InsaneDASM64::Instruction_t> vecDecodedInst;
@@ -312,16 +309,14 @@ static bool DeadStop::GenerateDasmOutput(
     if(vecDecodedInst.size() != vecDisassembledInst.size())
     {
         ssOut << "Decoded instructions and disassembled instruction count is not same.";
-        ssOut << "Where did you got this dog crap disassembler from?" << std::endl;
+        ssOut << "Where did you get this dog crap disassembler from?" << std::endl;
         return false;
     }
 
 
-    ssOut << "------------------------------ Crash Location ------------------------------" << std::endl;
-
     std::stringstream ssTemp;
-    size_t iInstAdrs = iStartAdrs;
-    bool bPasssedCrashLoc = false; // Did we pass by the instruction that caused signal?
+    size_t            iInstAdrs        = iStartAdrs;
+    bool              bPasssedCrashLoc = false; // Did we pass by the instruction that caused signal?
 
     for(size_t iInstIndex = 0; iInstIndex < vecDecodedInst.size(); iInstIndex++)
     {
@@ -342,53 +337,36 @@ static bool DeadStop::GenerateDasmOutput(
             case InsaneDASM64::Instruction_t::InstEncodingType_Legacy: 
                 {
                     InsaneDASM64::Legacy::LegacyInst_t* pLegacyInst = reinterpret_cast<InsaneDASM64::Legacy::LegacyInst_t*>(pInst->m_pInst);
+
+                    iTotalBytes += pLegacyInst->GetInstLengthInBytes();
                     
                     // Legacy prefixies
-                    iTotalBytes += pLegacyInst->m_legacyPrefix.m_nPrefix;
                     for(int iPrefixIndex = 0; iPrefixIndex < pLegacyInst->m_legacyPrefix.m_nPrefix; iPrefixIndex++)
                         ssTemp << std::setw(2) << static_cast<int>(pLegacyInst->m_legacyPrefix.m_legacyPrefix[iPrefixIndex]);
 
-
                     // REX byte
                     if(pLegacyInst->m_bHasREX == true)
-                    {
                         ssTemp << std::setw(2) << static_cast<int>(pLegacyInst->m_iREX);
-                        iTotalBytes++;
-                    }
-
 
                     // OpCodes
                     for(int iOpCodeIndex = 0; iOpCodeIndex < pLegacyInst->m_opCode.m_nOpBytes; iOpCodeIndex++)
                         ssTemp << std::setw(2) << static_cast<int>(pLegacyInst->m_opCode.m_opBytes[iOpCodeIndex]);
-                    iTotalBytes += pLegacyInst->m_opCode.m_nOpBytes;
-
 
                     // ModRm
                     if(pLegacyInst->m_bHasModRM == true)
-                    {
                         ssTemp << std::setw(2) << static_cast<int>(pLegacyInst->m_modrm.Get());
-                        iTotalBytes++;
-                    }
-
 
                     // SIB
                     if(pLegacyInst->m_bHasSIB == true)
-                    {
                         ssTemp << std::setw(2) << static_cast<int>(pLegacyInst->m_SIB.Get());
-                        iTotalBytes++;
-                    }
-
 
                     // Displacement
                     for(int iDispByteIndex = 0; iDispByteIndex < pLegacyInst->m_displacement.ByteCount(); iDispByteIndex++)
                         ssTemp << std::setw(2) << static_cast<int>(pLegacyInst->m_displacement.m_iDispBytes[iDispByteIndex]);
-                    iTotalBytes += pLegacyInst->m_displacement.ByteCount();
-
 
                     // Immediate
                     for(int iImmByteIndex = 0; iImmByteIndex < pLegacyInst->m_immediate.ByteCount(); iImmByteIndex++)
                         ssTemp << std::setw(2) << static_cast<int>(pLegacyInst->m_immediate.m_immediateByte[iImmByteIndex]);
-                    iTotalBytes += pLegacyInst->m_immediate.ByteCount();
                 }
                 break;
 
@@ -396,45 +374,32 @@ static bool DeadStop::GenerateDasmOutput(
                 {
                     InsaneDASM64::VEX::VEXInst_t* pVEXInst = reinterpret_cast<InsaneDASM64::VEX::VEXInst_t*>(pInst->m_pInst);
 
+                    iTotalBytes += pVEXInst->GetInstLengthInBytes();
+
                     // VEX prefix
                     ssTemp << std::setw(2) << static_cast<int>(pVEXInst->m_vexPrefix.m_iPrefix);
-                    iTotalBytes++;
-
                     
                     // VEX bytes
                     for(int iVEXByteIndex = 0; iVEXByteIndex < pVEXInst->m_vexPrefix.m_nVEXBytes; iVEXByteIndex++)
                         ssTemp << std::setw(2) << static_cast<int>(pVEXInst->m_vexPrefix.m_iVEX[iVEXByteIndex]);
-                    iTotalBytes += pVEXInst->m_vexPrefix.m_nVEXBytes;
-
 
                     // OpCode byte.
                     ssTemp << std::setw(2) << static_cast<int>(pVEXInst->m_opcode.GetMostSignificantOpCode());
-                    iTotalBytes++;
-
 
                     // ModRM
                     ssTemp << std::setw(2) << static_cast<int>(pVEXInst->m_modrm.Get());
-                    iTotalBytes++;
-
 
                     // SIB
                     if(pVEXInst->m_bHasSIB == true)
-                    {
                         ssTemp << std::setw(2) << static_cast<int>(pVEXInst->m_SIB.Get());
-                        iTotalBytes++;
-                    }
-
 
                     // Displacement
                     for(int iDispByteIndex = 0; iDispByteIndex < pVEXInst->m_disp.ByteCount(); iDispByteIndex++)
                         ssTemp << std::setw(2) << static_cast<int>(pVEXInst->m_disp.m_iDispBytes[iDispByteIndex]);
-                    iTotalBytes += pVEXInst->m_disp.ByteCount();
-
 
                     // Immediate
                     for(int iImmByteIndex = 0; iImmByteIndex < pVEXInst->m_immediate.ByteCount(); iImmByteIndex++)
                         ssTemp << std::setw(2) << static_cast<int>(pVEXInst->m_immediate.m_immediateByte[iImmByteIndex]);
-                    iTotalBytes += pVEXInst->m_immediate.ByteCount();
                 }
                 break;
 
@@ -442,46 +407,33 @@ static bool DeadStop::GenerateDasmOutput(
                 {
                     InsaneDASM64::EVEX::EVEXInst_t* pEVEXInst = reinterpret_cast<InsaneDASM64::EVEX::EVEXInst_t*>(pInst->m_pInst);
 
+                    iTotalBytes += pEVEXInst->GetInstLengthInBytes();
+
                     // EVEX prefix
                     ssTemp << std::setw(2) << static_cast<int>(pEVEXInst->m_evexPrefix.m_iPrefix);
-                    iTotalBytes++;
-
 
                     // EVEX payload
                     ssTemp << std::setw(2) << static_cast<int>(pEVEXInst->m_evexPrefix.m_iPayload1);
                     ssTemp << std::setw(2) << static_cast<int>(pEVEXInst->m_evexPrefix.m_iPayload2);
                     ssTemp << std::setw(2) << static_cast<int>(pEVEXInst->m_evexPrefix.m_iPayload3);
-                    iTotalBytes += 3;
-
 
                     // OpCode byte.
                     ssTemp << std::setw(2) << static_cast<int>(pEVEXInst->m_opcode.GetMostSignificantOpCode());
-                    iTotalBytes++;
-
 
                     // ModRM
                     ssTemp << std::setw(2) << static_cast<int>(pEVEXInst->m_modrm.Get());
-                    iTotalBytes++;
-
 
                     // SIB
                     if(pEVEXInst->m_bHasSIB == true)
-                    {
                         ssTemp << std::setw(2) << static_cast<int>(pEVEXInst->m_SIB.Get());
-                        iTotalBytes++;
-                    }
-
 
                     // Displacement
                     for(int iDispByteIndex = 0; iDispByteIndex < pEVEXInst->m_disp.ByteCount(); iDispByteIndex++)
                         ssTemp << std::setw(2) << static_cast<int>(pEVEXInst->m_disp.m_iDispBytes[iDispByteIndex]);
-                    iTotalBytes += pEVEXInst->m_disp.ByteCount();
-
 
                     // Immediate
                     for(int iImmByteIndex = 0; iImmByteIndex < pEVEXInst->m_immediate.ByteCount(); iImmByteIndex++)
                         ssTemp << std::setw(2) << static_cast<int>(pEVEXInst->m_immediate.m_immediateByte[iImmByteIndex]);
-                    iTotalBytes += pEVEXInst->m_immediate.ByteCount();
                 }
                 break;
 
@@ -489,8 +441,6 @@ static bool DeadStop::GenerateDasmOutput(
         }
         ssTemp << std::nouppercase << std::dec << std::setfill(' ');
         ssOut << "0x" << std::hex << iInstAdrs << std::dec << "    " << std::left << std::setw(32) << ssTemp.str();
-
-        iInstAdrs += iTotalBytes;
 
 
         switch(pDasmInst->m_nOperands)
@@ -507,12 +457,12 @@ static bool DeadStop::GenerateDasmOutput(
         }
 
         // if at crash inst. address, mark it.
-        if(iInstAdrs - iTotalBytes == pCrashLocation)
-            ssOut << "  <--[ crashed here ]";
+        if(iInstAdrs == pCrashLocation)
+            ssOut << "  <--[ " << szRipMsg << " ]";
 
 
         // Finding potential string pointer in this instruction.
-        const char* szPotentialString = reinterpret_cast<const char*>(GetPointerFromModrm(*pInst, iInstAdrs - iTotalBytes));
+        const char* szPotentialString = reinterpret_cast<const char*>(GetPointerFromModrm(*pInst, iInstAdrs));
 
         if(szPotentialString != nullptr)
         {
@@ -524,18 +474,23 @@ static bool DeadStop::GenerateDasmOutput(
             uintptr_t iPotentialStringAdrs = reinterpret_cast<uintptr_t>(szPotentialString);
             if(g_memRegionHandler.HasParentRegion(iPotentialStringAdrs, iPotentialStringAdrs + iCharsToRead) == true)
             {
-                for(int i = 0; i < iCharsToRead && szPotentialString[i] != '\0'; i++)
+                for(int i = 0; i < iCharsToRead; i++)
                 {
+                    if(szPotentialString[i] == '\0')
+                        break;
+
+                    if(IsCharPrintable(szPotentialString[i]) == false)
+                        break;
+
                     ssOut << szPotentialString[i];
                 }
             }
         }
 
+        iInstAdrs += iTotalBytes;
 
         ssOut << '\n';
     }
-
-    ssOut << '\n' << "----------------------------------------------------------------------------" << std::endl;
 
 
     // Deallocate all arenas...
@@ -579,11 +534,10 @@ static void* DeadStop::GetPointerFromModrm(InsaneDASM64::Legacy::LegacyInst_t* p
     {
 
         // Get the displacement value if there are any displacement bytes.
-        // NOTE : Doing it this way assures that endians are handled correctly.
         int32_t iDisplacement = 0;
         switch(pLegacyInst->m_displacement.ByteCount())
         {
-            // Single byte displacement. No need to worry about endians.
+            // NOTE : Doing it this way handles endian & sign / zero extension.
             case 1: iDisplacement = static_cast<int32_t>(static_cast<int8_t>(pLegacyInst->m_displacement.m_iDispBytes[0])); break;
             case 2: iDisplacement = static_cast<int32_t>(*reinterpret_cast<int16_t*>(&pLegacyInst->m_displacement.m_iDispBytes[0])); break;
             case 4: iDisplacement = *reinterpret_cast<int32_t*>(&pLegacyInst->m_displacement.m_iDispBytes[0]); break;
@@ -630,14 +584,13 @@ static void* DeadStop::GetPointerFromModrm(InsaneDASM64::Legacy::LegacyInst_t* p
 
 
         // Get the displacement value if there are any displacement bytes.
-        // NOTE : Doing it this way assures that endians are handled correctly.
-        int32_t iDisplacement = *reinterpret_cast<int32_t*>(&pLegacyInst->m_displacement.m_iDispBytes[0]);
+        int32_t iDisplacement = 0;
         switch(pLegacyInst->m_displacement.ByteCount())
         {
-            // Single byte displacement. No need to worry about endians.
-            case 1: iDisplacement &= 0xFF; break;
-            case 2: iDisplacement &= 0xFFFF; break;
-            case 4: iDisplacement &= 0xFFFFFFFF; break;
+            // NOTE : Doing it this way handles endian & sign / zero extension.
+            case 1: iDisplacement = static_cast<int32_t>(static_cast<int8_t>(pLegacyInst->m_displacement.m_iDispBytes[0])); break;
+            case 2: iDisplacement = static_cast<int32_t>(*reinterpret_cast<int16_t*>(&pLegacyInst->m_displacement.m_iDispBytes[0])); break;
+            case 4: iDisplacement = *reinterpret_cast<int32_t*>(&pLegacyInst->m_displacement.m_iDispBytes[0]); break;
 
             default: iDisplacement = 0; break;
         }
@@ -668,6 +621,10 @@ static void* DeadStop::GetPointerFromModrm(InsaneDASM64::Legacy::LegacyInst_t* p
         iScaleReg *= static_cast<intptr_t>(s_iScaleRegMult[pLegacyInst->SIB_Scale()]);
 
         szFinalPointer = reinterpret_cast<void*>(iBaseReg + iScaleReg + iDisplacement);
+        if(g_memRegionHandler.HasParentRegion(reinterpret_cast<uintptr_t>(szFinalPointer)) == false)
+            return nullptr;
+
+        szFinalPointer = *reinterpret_cast<void**>(szFinalPointer);
 
         WIN_LOG("Found a potential string pointer [ %p ]", szFinalPointer);
     }
@@ -688,15 +645,20 @@ static void* DeadStop::GetPointerFromModrm(InsaneDASM64::Legacy::LegacyInst_t* p
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
-static bool DeadStop::Analyze()
+static bool DeadStop::Analyze(std::vector<uintptr_t>& vecCallStack)
 {
     uintptr_t pCrashLoc = static_cast<uintptr_t>(g_pContext->uc_mcontext.gregs[REG_RIP]);
 
-    std::vector<uintptr_t> vecCallStack; vecCallStack.push_back(pCrashLoc);
+    vecCallStack.clear(); vecCallStack.push_back(pCrashLoc);
 
-    for(int i = 0; i < 2; i++)
+    ArenaAllocator_t allocator(8 * 1024); // 8 KiB arenas.
+                                          
+    int iCallStackDepth = DeadStop_t::GetInstance().GetCallStackDepth();
+    for(int i = 0; i < iCallStackDepth; i++)
     {
-        uintptr_t iReturnAdrs = GetReturnAdrs(vecCallStack.back());
+        allocator.ResetAllArena();
+
+        uintptr_t iReturnAdrs = GetReturnAdrs(vecCallStack.back(), allocator);
         LOG("Return address detected : %p", iReturnAdrs);
 
         if(iReturnAdrs == 0)
@@ -705,6 +667,7 @@ static bool DeadStop::Analyze()
         vecCallStack.push_back(iReturnAdrs);
     }
 
+    allocator.FreeAll();
 
     return true;
 }
@@ -712,13 +675,53 @@ static bool DeadStop::Analyze()
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
-static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
+static bool DeadStop::WriteFnChainToFile(std::fstream& hFile, const std::vector<uintptr_t>& vecCallStack)
+{
+    if(vecCallStack.empty() == true)
+        return false;
+
+
+    DoBranding(hFile); hFile << "Call Stack : \n";
+    for(size_t iFnIndex = 0; iFnIndex < vecCallStack.size(); iFnIndex++)
+    {
+        hFile << "    "; // Indentation.
+        hFile << iFnIndex << ". ";
+        hFile << std::uppercase << std::hex << "0x" << vecCallStack[iFnIndex] << std::nouppercase << std::dec;
+        if(iFnIndex == 0)
+            hFile << " <--[ crashed here ]";
+
+        hFile << '\n';
+    }
+    hFile << '\n';
+
+
+    std::stringstream ssTemp;
+    int iAsmDumpRange = DeadStop_t::GetInstance().GetAsmDumpRange();
+    for(size_t iFnIndex = 0; iFnIndex < vecCallStack.size(); iFnIndex++)
+    {
+        ssTemp.clear(); ssTemp.str("");
+        ssTemp << "Function Index : " << iFnIndex << ",  0x" << std::uppercase << std::hex << vecCallStack[iFnIndex] << std::nouppercase << std::dec;
+        StartBanner(hFile, ssTemp.str().c_str());
+
+        if(DumpAssembly(hFile, vecCallStack[iFnIndex], iAsmDumpRange, iFnIndex == 0 ? "Crashed Here" : "Return Adrs") == false)
+            break;
+
+        EndBanner(hFile, ssTemp.str().c_str());
+        hFile << '\n';
+    }
+
+    
+    return true;
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& allocator)
 {
     if(DeadStop_t::GetInstance().IsInitialized() == false)
         return 0;
 
-
-    ArenaAllocator_t allocator(8 * 1024); // 8 KiB arenas.
     
     // Rolling buffer for valid instruction pointers.
     constexpr size_t MAX_ADRS_BUFFER = 10;
@@ -732,8 +735,7 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
 
 
     int64_t iPushPopOffset = 0; // How much have Push & Pop instuctions moved RSP in between StartPos to RETN inst.
-    uintptr_t iRetInstAdrs = 0;
-    bool      bRetFound    = false;
+    bool    bRetFound      = false;
     for(int i = 0; i < 100; i++)
     {
         uintptr_t iBatchStartAdrs = qValidInstAdrs.back();
@@ -750,8 +752,8 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
         {
             vecBytes.push_back(*(reinterpret_cast<InsaneDASM64::Byte*>(iBatchStartAdrs) + iByteIndex));
         }
-        assertion(vecBytes.size() == DASM_BATCH_SIZE && "FUCK U NIGGA");
-
+        assertion(vecBytes.size() == DASM_BATCH_SIZE);
+ 
 
         // Decoder using bytes.
         vecInst.clear();
@@ -791,7 +793,7 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
 
                     // Can happen for instructions whose full byte weren't feed.
                 case InsaneDASM64::Instruction_t::InstEncodingType_Invalid:
-                default: continue; break;
+                default: continue;
             }
             
 
@@ -823,7 +825,7 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
         if(bRetFound == true)
             break;
 
-        // no free. just mark em as free.
+        // no free. just mark it as free.
         allocator.ResetAllArena();
     }
 
@@ -857,6 +859,11 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
     }
 
     assertion(vecInst.size() == vecDasmInst.size() && "Decoded & Disasembled instruction count doens't match.");
+    // qValidInstAdrs holds memory addresses of consecutive instrutions. when we disassemble from first
+    // entry to last entry we get one less instruction than entries, because :
+    // 0, 1, 2, 3, 4, 5         Total 6
+    // 0-1, 1-2, 2-3, 3-4, 4-5, Total 5
+    // i.e. no bytes for last instruction according in qValidInstAdrs.
     assertion(qValidInstAdrs.size() - 1 == vecDasmInst.size() && "Valid instruction addresses don't line up with disassembled inst count.");
 
 
@@ -868,18 +875,8 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
     }
 
 
-    for(InsaneDASM64::DASMInst_t& inst : vecDasmInst)
-    {
-        printf("%s", inst.m_szMnemonic);
-        for(int i = 0; i < inst.m_nOperands; i++) printf("%s, ", inst.m_szOperands[i]);
-
-        printf("\n");
-    }
-
-
-    // There are less than 2 instructions between start & RETN instruction.
-    // i.e. Start pos is restoring stack frame or some shit.
-    // We can't determine return adrs without atleast 2 instructions.
+    // if less than 2 instructions between start adrs & RETN inst adrs.
+    // then we caused "signal" in stack frame's epilogue. and thats BS.
     if(vecInst.size() <= 2)
         return 0;
 
@@ -887,7 +884,7 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
     // second last instruction, right above RETN instruction.
     InsaneDASM64::Instruction_t* pMagicInst = &vecInst[vecInst.size() - 2];
 
-    // What the fuck are we even disassembling?
+    // Must only have Legacy encoded instructions in stack frame epilogue. 
     if(pMagicInst->m_iInstEncodingType != InsaneDASM64::Instruction_t::InstEncodingType_Legacy)
         return 0;
 
@@ -904,8 +901,9 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
 
     if(bStackFrameOmitted == false)
     {
-        WIN_LOG("Stack Frame Found");
+        WIN_LOG("This function has a stack frame.");
 
+        // At rBP is the pushed rBP (from stack frame prologue.). Next to that is the return adrs.
         uintptr_t pReturnAdrs = static_cast<uintptr_t>(g_pContext->uc_mcontext.gregs[REG_RBP]) + 8;
         if(g_memRegionHandler.HasParentRegion(pReturnAdrs) == false)
             return 0;
@@ -922,23 +920,21 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
     // Stack frame omitted.
     // Iterate from second last to front, and find the first instruction which
     // modifies the rSP register. Should be the second inst itself in most cases.
-    InsaneDASM64::Legacy::LegacyInst_t* pStackRestoringInst = nullptr;
+    InsaneDASM64::Legacy::LegacyInst_t* pStackRestoringInst     = nullptr;
     uintptr_t                           iAdrsStackRestoringInst = 0;
     for(int iInstIndex = static_cast<int>(vecInst.size()) - 2; iInstIndex >= 0; iInstIndex--)
     {
         InsaneDASM64::DASMInst_t*    pDasmInst = &vecDasmInst[iInstIndex];
         InsaneDASM64::Instruction_t* pInst     = &vecInst[iInstIndex];
-        uintptr_t                    iInstAdrs = qValidInstAdrs[iInstIndex];
+        uintptr_t                    iInstAdrs = qValidInstAdrs[iInstIndex - 1]; // -1 cause @ last index is adrs of inst next to RETN.
 
         // Break @ first rSP modifying instruction.
         if(pInst->m_iInstEncodingType == InsaneDASM64::Instruction_t::InstEncodingType_Legacy)
         {
             if(pDasmInst->m_nOperands >= 1 && CaseInsensitiveStringMatch(pDasmInst->m_szOperands[0], "rsp") == true)
             {
-                WIN_LOG("Found rsp modifying instruction.");
-                printf("--> %s  ", pDasmInst->m_szMnemonic);
-                for(int i = 0; i < pDasmInst->m_nOperands; i++) printf("%s, ", pDasmInst->m_szOperands[i]);
-                printf("\n");
+                WIN_LOG("Found rsp modifying instruction. @ %p", iInstAdrs);
+                LOG("%s %s, %s", pDasmInst->m_szMnemonic, pDasmInst->m_szOperands[0], pDasmInst->m_szOperands[1]);
 
                 pStackRestoringInst     = reinterpret_cast<InsaneDASM64::Legacy::LegacyInst_t*>(pInst->m_pInst);
                 iAdrsStackRestoringInst = iInstAdrs;
@@ -948,21 +944,33 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
     }
 
 
-    // This function failed both "Normal Stack Frame" & "Omitte Stack Check"
+    // This function failed both "Normal Stack Frame" & "Omitted Stack Check"
     // This function must be a leaf function, hence rsp is unchanged.
     if(pStackRestoringInst == nullptr)
-        return static_cast<uintptr_t>(g_pContext->uc_mcontext.gregs[REG_RSP]);
+    {
+        // Push Pop can still occur in leaf fns?
+        uintptr_t pReturnAdrs = static_cast<uintptr_t>(g_pContext->uc_mcontext.gregs[REG_RSP] + iPushPopOffset); 
+        if(g_memRegionHandler.HasParentRegion(pReturnAdrs) == false)
+            return 0;
+
+        uintptr_t iReturnAdrs = *reinterpret_cast<uintptr_t*>(pReturnAdrs);
+        if(g_memRegionHandler.HasParentRegion(iReturnAdrs) == false)
+            return 0;
+
+        return iReturnAdrs;
+    }
 
 
     if(pStackRestoringInst->m_opCode.m_pOpCodeDesc == nullptr)
     {
-        FAIL_LOG("Stack restoring instruction for an omitted stack frame function is invalid.");
+        FAIL_LOG("OpCode description of a Stack restoring instruction for an omitted stack frame function is invalid.");
         return 0;
     }
 
     // If stack restoring inst is a "LEA" instruction.
     if(CaseInsensitiveStringMatch(pStackRestoringInst->m_opCode.m_pOpCodeDesc->m_szName, "LEA") == true)
     {
+        // No Push Pop offset here, LEA will load the correct adrs at once.
         uintptr_t pReturnAdrs = reinterpret_cast<uintptr_t>(GetPointerFromModrm(pStackRestoringInst, iAdrsStackRestoringInst));
         if(g_memRegionHandler.HasParentRegion(pReturnAdrs) == false) // Failed to get return address. 
             return 0;
@@ -1003,10 +1011,10 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos)
         }
         else if(pOpcdDesc->m_operands[1].m_iOperandMode == InsaneDASM64::Standard::OperandMode_I)
         {
-            int64_t iImmediate = 0; // *reinterpret_cast<int64_t*>(&pInst->m_immediate.m_immediateByte[0]);
+            // NOTE : Doing it this way, will handle sign/zero extension & endian.
+            int64_t iImmediate = 0;
             switch(pInst->m_immediate.ByteCount())
             {
-                // Single byte displacement. No need to worry about endians.
                 case 1: iImmediate = static_cast<intptr_t>(static_cast<int8_t>(pInst->m_immediate.m_immediateByte[0])); break;
                 case 2: iImmediate = static_cast<intptr_t>(*reinterpret_cast<int16_t*>(&pInst->m_immediate.m_immediateByte[0])); break;
                 case 4: iImmediate = static_cast<intptr_t>(*reinterpret_cast<int32_t*>(&pInst->m_immediate.m_immediateByte[0])); break;
@@ -1066,6 +1074,14 @@ static bool DeadStop::CaseInsensitiveStringMatch(const char* szString1, const ch
     return *szString1 == 0 && *szString2 == 0;
 }
 
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+static bool DeadStop::IsCharPrintable(char c)
+{
+    return c >= 32 && c <= 126;
+}
+
     
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
@@ -1085,9 +1101,9 @@ static void DeadStop::DumpGeneralRegisters(std::fstream& hFile)
             iMaxRegNameSize = iLen;
 
 
-    hFile << std::uppercase << std::hex << std::setfill('0');
+    StartBanner(hFile, "General Purpose Registers");
 
-    hFile << "------------------------------ General Registers------------------------------" << std::endl;
+    hFile << std::uppercase << std::hex << std::setfill('0');
     for(int iRegIndex = 0; iRegIndex < __NGREG; iRegIndex++)
     {
         // This register name's size.
@@ -1103,9 +1119,9 @@ static void DeadStop::DumpGeneralRegisters(std::fstream& hFile)
 
         hFile << std::endl;
     }
-    hFile << "------------------------------------------------------------------------------" << std::endl;
-
     hFile << std::nouppercase << std::dec << std::setfill(' ');
+
+    EndBanner(hFile, "General Purpose Registers");
 }
 
 
@@ -1153,5 +1169,21 @@ static void DeadStop::DumpDateTime(std::fstream& hFile)
 ///////////////////////////////////////////////////////////////////////////
 static void DeadStop::DoBranding(std::fstream& hFile)
 {
-    hFile << " [ DeadStop ]";
+    hFile << " [ DeadStop ] ";
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+static void DeadStop::StartBanner(std::fstream& hFile, const char* szMsg)
+{
+    hFile << "[ Start ]------------------------------->  " << szMsg << std::endl;
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+static void DeadStop::EndBanner(std::fstream& hFile, const char* szMsg)
+{
+    hFile << "[  End  ]------------------------------->  " << szMsg << std::endl;
 }

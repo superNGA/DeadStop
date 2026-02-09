@@ -24,13 +24,14 @@ namespace DEADSTOP_NAMESPACE
             // Singleton instance getter.
             static DeadStop_t& GetInstance() { static DeadStop_t instance; return instance; }
 
-            ErrCodes_t Initialize(const char* szDumpFilePath, int iAsmDumpRangeinBytes = 50, int iStringDumpSize = 5);
+            ErrCodes_t Initialize(const char* szDumpFilePath, int iAsmDumpRangeinBytes, int iStringDumpSize, int iCallStackDepth);
             ErrCodes_t Uninitialize();
 
             bool IsInitialized() const;
             const std::string& GetDumpFilePath() const;
-            int GetAsmDumpRange() const;
+            int GetAsmDumpRange()   const;
             int GetStringDumpSize() const;
+            int GetCallStackDepth() const;
 
         private:
             // Singleton.
@@ -40,8 +41,12 @@ namespace DEADSTOP_NAMESPACE
 
             bool        m_bInitialized = false;
             std::string m_szDumpFilePath;
-            int         m_iAsmDumpRange = 0;
+
+
+            // Output properties...
+            int         m_iAsmDumpRange   = 0;
             int         m_iStringDumpSize = 0;
+            int         m_iCallStackDepth = 0;
 
             struct sigaction m_sigAction;
     };
