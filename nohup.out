@@ -1,2 +1,0 @@
-ERROR [neovide::bridge::session] Nvim: Caught deadly signal 'SIGHUP'
-ERROR [neovide::bridge::session] Nvim: Finished.
