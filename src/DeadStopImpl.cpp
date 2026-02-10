@@ -37,7 +37,7 @@ DeadStop_t::DeadStop_t()
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
-ErrCodes_t DeadStop_t::Initialize(const char* szDumpFilePath, int iAsmDumpRangeinBytes, int iStringDumpSize, int iCallStackDepth)
+ErrCodes_t DeadStop_t::Initialize(const char* szDumpFilePath, int iAsmDumpRangeinBytes, int iStringDumpSize, int iCallStackDepth, int iSignatureSize)
 {
     assertion(m_bInitialized == false && "DeadStop is already initialized.");
     assertion(szDumpFilePath != nullptr && "Invalid dump file path");
@@ -45,11 +45,13 @@ ErrCodes_t DeadStop_t::Initialize(const char* szDumpFilePath, int iAsmDumpRangei
     assertion(iAsmDumpRangeinBytes < 0x1000 && "Too big dump range");
     assertion(iStringDumpSize >= 0 && "Invalid string dump size. Must be more than 0");
     assertion(iCallStackDepth > 0 && "Invalid call stack depth");
+    assertion(iSignatureSize >= 0 && "Invalig signature size. Use 0 for no signature");
 
 
     m_iStringDumpSize = iStringDumpSize;
     m_iAsmDumpRange   = iAsmDumpRangeinBytes;
     m_iCallStackDepth = iCallStackDepth;
+    m_iSignatureSize  = iSignatureSize;
 
 
     // Starting up submodules...
@@ -135,4 +137,12 @@ int DeadStop_t::GetStringDumpSize() const
 int DeadStop_t::GetCallStackDepth() const
 {
     return m_iCallStackDepth;
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+int DeadStop_t::GetSignatureSize() const
+{
+    return m_iSignatureSize;
 }

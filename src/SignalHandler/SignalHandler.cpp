@@ -56,6 +56,8 @@ namespace DEADSTOP_NAMESPACE
     static bool DumpAssembly(std::fstream& hFile, uintptr_t pPivotLocation, int iAsmDumpRangeInBytes, const char* szRipMsg = nullptr);
     static bool GenerateDasmOutput( // This is a internal function used by DumpAssembly ( above ).
             std::stringstream& ssOut, uintptr_t iStartAdrs, const std::vector<InsaneDASM64::Byte>& vecBytes, uintptr_t pCrashLocation, const char* szRipMsg);
+    static bool MakeSignature(
+            std::stringstream& sigOut, const std::vector<InsaneDASM64::Instruction_t>& vecInst, size_t iStartIndex, size_t iSignatureSizeInBytes);
 
     static void* GetPointerFromModrm(InsaneDASM64::Instruction_t& inst, uintptr_t iStartAdrs);
     static void* GetPointerFromModrm(InsaneDASM64::Legacy::LegacyInst_t* pLegacyInst, uintptr_t iStartAdrs);
@@ -458,7 +460,17 @@ static bool DeadStop::GenerateDasmOutput(
 
         // if at crash inst. address, mark it.
         if(iInstAdrs == pCrashLocation)
+        {
             ssOut << "  <--[ " << szRipMsg << " ]";
+
+            // Generating signature.
+            int iSignatureSize = DeadStop_t::GetInstance().GetSignatureSize();
+            if(iSignatureSize > 0)
+            {
+                ssOut << " Sig : ";
+                MakeSignature(ssOut, vecDecodedInst, iInstIndex, DeadStop_t::GetInstance().GetSignatureSize());
+            }
+        }
 
 
         // Finding potential string pointer in this instruction.
@@ -498,6 +510,141 @@ static bool DeadStop::GenerateDasmOutput(
 
     // Return whehter this disassembly was valid or not.
     return bPasssedCrashLoc;
+}
+
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+static bool DeadStop::MakeSignature(
+        std::stringstream& sigOut, const std::vector<InsaneDASM64::Instruction_t>& vecInst, size_t iStartIndex, size_t iSignatureSizeInBytes)
+{
+    if(vecInst.empty() == true)
+        return false;
+
+
+    sigOut << std::uppercase << std::hex << std::setfill('0');
+
+    int nInstCount = vecInst.size();
+    int iSigSize   = 0;
+    for(int iInstIndex = iStartIndex; iInstIndex < nInstCount; iInstIndex++)
+    {
+        const InsaneDASM64::Instruction_t* pInst = &vecInst[iInstIndex];
+
+
+        if(static_cast<size_t>(iSigSize) >= iSignatureSizeInBytes)
+            break;
+
+
+        switch(pInst->m_iInstEncodingType)
+        {
+            case InsaneDASM64::Instruction_t::InstEncodingType_Legacy: 
+                {
+                    InsaneDASM64::Legacy::LegacyInst_t* pLegacyInst = reinterpret_cast<InsaneDASM64::Legacy::LegacyInst_t*>(pInst->m_pInst);
+                    iSigSize += pLegacyInst->GetInstLengthInBytes();
+
+                    // Legacy prefixies
+                    for(int iPrefixIndex = 0; iPrefixIndex < pLegacyInst->m_legacyPrefix.m_nPrefix; iPrefixIndex++)
+                        sigOut << std::setw(2) << static_cast<int>(pLegacyInst->m_legacyPrefix.m_legacyPrefix[iPrefixIndex]) << ' ';
+
+                    // REX byte
+                    if(pLegacyInst->m_bHasREX == true)
+                        sigOut << std::setw(2) << static_cast<int>(pLegacyInst->m_iREX) << ' ';
+
+                    // OpCodes
+                    for(int iOpCodeIndex = 0; iOpCodeIndex < pLegacyInst->m_opCode.m_nOpBytes; iOpCodeIndex++)
+                        sigOut << std::setw(2) << static_cast<int>(pLegacyInst->m_opCode.m_opBytes[iOpCodeIndex]) << ' ';
+
+                    // ModRm
+                    if(pLegacyInst->m_bHasModRM == true)
+                        sigOut << std::setw(2) << static_cast<int>(pLegacyInst->m_modrm.Get()) << ' ';
+
+                    // SIB
+                    if(pLegacyInst->m_bHasSIB == true)
+                        sigOut << std::setw(2) << static_cast<int>(pLegacyInst->m_SIB.Get()) << ' ';
+
+                    // Displacement
+                    for(int iDispByteIndex = 0; iDispByteIndex < pLegacyInst->m_displacement.ByteCount(); iDispByteIndex++)
+                        sigOut << "? ";
+
+                    // Immediate
+                    for(int iImmByteIndex = 0; iImmByteIndex < pLegacyInst->m_immediate.ByteCount(); iImmByteIndex++)
+                        sigOut << "? ";
+                }
+                break;
+
+            case InsaneDASM64::Instruction_t::InstEncodingType_VEX:
+                {
+                    InsaneDASM64::VEX::VEXInst_t* pVEXInst = reinterpret_cast<InsaneDASM64::VEX::VEXInst_t*>(pInst->m_pInst);
+                    iSigSize += pVEXInst->GetInstLengthInBytes();
+
+                    // VEX prefix
+                    sigOut << std::setw(2) << static_cast<int>(pVEXInst->m_vexPrefix.m_iPrefix) << ' ';
+                    
+                    // VEX bytes
+                    for(int iVEXByteIndex = 0; iVEXByteIndex < pVEXInst->m_vexPrefix.m_nVEXBytes; iVEXByteIndex++)
+                        sigOut << std::setw(2) << static_cast<int>(pVEXInst->m_vexPrefix.m_iVEX[iVEXByteIndex]) << ' ';
+
+                    // OpCode byte.
+                    sigOut << std::setw(2) << static_cast<int>(pVEXInst->m_opcode.GetMostSignificantOpCode()) << ' ';
+
+                    // ModRM
+                    sigOut << std::setw(2) << static_cast<int>(pVEXInst->m_modrm.Get()) << ' ';
+
+                    // SIB
+                    if(pVEXInst->m_bHasSIB == true)
+                        sigOut << std::setw(2) << static_cast<int>(pVEXInst->m_SIB.Get()) << ' ';
+
+                    // Displacement
+                    for(int iDispByteIndex = 0; iDispByteIndex < pVEXInst->m_disp.ByteCount(); iDispByteIndex++)
+                        sigOut << "? ";
+
+                    // Immediate
+                    for(int iImmByteIndex = 0; iImmByteIndex < pVEXInst->m_immediate.ByteCount(); iImmByteIndex++)
+                        sigOut << "? ";
+                }
+                break;
+
+            case InsaneDASM64::Instruction_t::InstEncodingType_EVEX:
+                {
+                    InsaneDASM64::EVEX::EVEXInst_t* pEVEXInst = reinterpret_cast<InsaneDASM64::EVEX::EVEXInst_t*>(pInst->m_pInst);
+                    iSigSize = pEVEXInst->GetInstLengthInBytes();
+
+                    // EVEX prefix
+                    sigOut << std::setw(2) << static_cast<int>(pEVEXInst->m_evexPrefix.m_iPrefix) << ' ';
+
+                    // EVEX payload
+                    sigOut << std::setw(2) << static_cast<int>(pEVEXInst->m_evexPrefix.m_iPayload1) << ' ';
+                    sigOut << std::setw(2) << static_cast<int>(pEVEXInst->m_evexPrefix.m_iPayload2) << ' ';
+                    sigOut << std::setw(2) << static_cast<int>(pEVEXInst->m_evexPrefix.m_iPayload3) << ' ';
+
+                    // OpCode byte.
+                    sigOut << std::setw(2) << static_cast<int>(pEVEXInst->m_opcode.GetMostSignificantOpCode()) << ' ';
+
+                    // ModRM
+                    sigOut << std::setw(2) << static_cast<int>(pEVEXInst->m_modrm.Get()) << ' ';
+
+                    // SIB
+                    if(pEVEXInst->m_bHasSIB == true)
+                        sigOut << std::setw(2) << static_cast<int>(pEVEXInst->m_SIB.Get()) << ' ';
+
+                    // Displacement
+                    for(int iDispByteIndex = 0; iDispByteIndex < pEVEXInst->m_disp.ByteCount(); iDispByteIndex++)
+                        sigOut << "? ";
+
+                    // Immediate
+                    for(int iImmByteIndex = 0; iImmByteIndex < pEVEXInst->m_immediate.ByteCount(); iImmByteIndex++)
+                        sigOut << "? ";
+                }
+                break;
+
+            default: break;
+        }
+    }
+
+    sigOut << std::nouppercase << std::dec << std::setfill(' ');
+
+
+    return true;
 }
 
 
@@ -700,7 +847,7 @@ static bool DeadStop::WriteFnChainToFile(std::fstream& hFile, const std::vector<
     for(size_t iFnIndex = 0; iFnIndex < vecCallStack.size(); iFnIndex++)
     {
         ssTemp.clear(); ssTemp.str("");
-        ssTemp << "Function Index : " << iFnIndex << ",  0x" << std::uppercase << std::hex << vecCallStack[iFnIndex] << std::nouppercase << std::dec;
+        ssTemp << "Function Index : " << iFnIndex << ". Adrs : 0x" << std::uppercase << std::hex << vecCallStack[iFnIndex] << std::nouppercase << std::dec;
         StartBanner(hFile, ssTemp.str().c_str());
 
         if(DumpAssembly(hFile, vecCallStack[iFnIndex], iAsmDumpRange, iFnIndex == 0 ? "Crashed Here" : "Return Adrs") == false)
