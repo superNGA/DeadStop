@@ -43,6 +43,11 @@ target_compile_features(DeadStop PRIVATE cxx_std_17)
 # target_compile_options(DeadStop PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fomit-frame-pointer>)
 
 
-# Building example.
+# Building Example 1.
 add_executable(DeadStopExample1 ${CMAKE_CURRENT_SOURCE_DIR}/Example/Example1.cpp)
 target_link_libraries(DeadStopExample1 PRIVATE ${PROJECT_NAME})
+
+# Example 2.
+add_executable(DeadStopExample2 ${CMAKE_CURRENT_SOURCE_DIR}/Example/Example2.cpp)
+target_link_libraries(DeadStopExample2 PRIVATE ${PROJECT_NAME})
+target_compile_options(DeadStopExample2 PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fomit-frame-pointer>)

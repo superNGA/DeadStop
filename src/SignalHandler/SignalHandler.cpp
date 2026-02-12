@@ -36,6 +36,17 @@ using namespace DeadStop;
 
 
 
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+namespace DEADSTOP_NAMESPACE
+{
+    struct StackFrame_t
+    {
+        greg_t m_rSP = 0;
+        greg_t m_rBP = 0;
+    };
+}
+
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
@@ -65,7 +76,7 @@ namespace DEADSTOP_NAMESPACE
     // Call stack analysis.
     static bool Analyze(std::vector<uintptr_t>& vecCallStack);
     static bool WriteFnChainToFile(std::fstream& hFile, const std::vector<uintptr_t>& vecCallStack);
-    static uintptr_t GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& allocator);
+    static uintptr_t GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& allocator, StackFrame_t& iStackFrame);
 
     // String Utility.
     static bool CaseInsensitiveStringMatch(const char* szString1, const char* szString2);
@@ -796,7 +807,14 @@ static bool DeadStop::Analyze(std::vector<uintptr_t>& vecCallStack)
 {
     uintptr_t pCrashLoc = static_cast<uintptr_t>(g_pContext->uc_mcontext.gregs[REG_RIP]);
 
-    vecCallStack.clear(); vecCallStack.push_back(pCrashLoc);
+    vecCallStack.clear(); 
+    vecCallStack.push_back(pCrashLoc);
+
+
+    StackFrame_t iStackFrame; 
+    iStackFrame.m_rSP = g_pContext->uc_mcontext.gregs[REG_RSP];
+    iStackFrame.m_rBP = g_pContext->uc_mcontext.gregs[REG_RBP];
+
 
     ArenaAllocator_t allocator(8 * 1024); // 8 KiB arenas.
                                           
@@ -805,8 +823,9 @@ static bool DeadStop::Analyze(std::vector<uintptr_t>& vecCallStack)
     {
         allocator.ResetAllArena();
 
-        uintptr_t iReturnAdrs = GetReturnAdrs(vecCallStack.back(), allocator);
-        LOG("Return address detected : %p", iReturnAdrs);
+        LOG("Processing call index : %d", i);
+        uintptr_t iReturnAdrs = GetReturnAdrs(vecCallStack.back(), allocator, iStackFrame);
+        LOG("Call index %d processed. Return address detected : %p\n", i, iReturnAdrs);
 
         if(iReturnAdrs == 0)
             break;
@@ -864,7 +883,7 @@ static bool DeadStop::WriteFnChainToFile(std::fstream& hFile, const std::vector<
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
-static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& allocator)
+static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& allocator, StackFrame_t& iStackFrame)
 {
     if(DeadStop_t::GetInstance().IsInitialized() == false)
         return 0;
@@ -883,6 +902,7 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& 
 
     int64_t iPushPopOffset = 0; // How much have Push & Pop instuctions moved RSP in between StartPos to RETN inst.
     bool    bRetFound      = false;
+    size_t  iTotalValidInst = 0;
     for(int i = 0; i < 100; i++)
     {
         uintptr_t iBatchStartAdrs = qValidInstAdrs.back();
@@ -903,14 +923,17 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& 
  
 
         // Decoder using bytes.
-        vecInst.clear();
+        vecInst.clear(); allocator.ResetAllArena();
         if(InsaneDASM64::Decode(vecBytes, vecInst, allocator) != InsaneDASM64::IDASMErrorCode_Success)
             break;
 
 
+        iTotalValidInst += vecInst.size();
+
         // Find return statement.
-        for(InsaneDASM64::Instruction_t& inst : vecInst)
+        for(size_t iInstIndex = 0; iInstIndex < vecInst.size(); iInstIndex++)
         {
+            InsaneDASM64::Instruction_t& inst = vecInst[iInstIndex];
             int iInstLength = 0;
             switch (inst.m_iInstEncodingType) 
             {
@@ -939,7 +962,7 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& 
                     break;
 
                     // Can happen for instructions whose full byte weren't feed.
-                case InsaneDASM64::Instruction_t::InstEncodingType_Invalid:
+                case InsaneDASM64::Instruction_t::InstEncodingType_Invalid: iInstLength = 1; break;
                 default: continue;
             }
             
@@ -956,7 +979,7 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& 
             InsaneDASM64::Legacy::LegacyInst_t* pInst = reinterpret_cast<InsaneDASM64::Legacy::LegacyInst_t*>(inst.m_pInst);
             if(pInst->m_opCode.m_pOpCodeDesc == nullptr)
             {
-                FAIL_LOG("Decoder failed :( BS Decoder.");
+                FAIL_LOG("Incomplete inst found. Skipping.");
                 continue;
             }
 
@@ -964,6 +987,10 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& 
             // if(pInst->m_opCode.m_pOpCodeDesc->m_iByte == 0xC3 && pInst->m_opCode.m_nOpBytes == 1)
             if(strcmp(pInst->m_opCode.m_pOpCodeDesc->m_szName, "RETN") == 0)
             {
+                LOG("Found \"RETN\" instruction @ address : %p. [ %zu / %zu ] OpCode : 0x%02X",
+                        qValidInstAdrs.back() - static_cast<uintptr_t>(iInstLength), 
+                        iInstIndex + iTotalValidInst, vecInst.size() + iTotalValidInst,
+                        pInst->m_opCode.m_opBytes[0]);
                 bRetFound = true;
                 break;
             }
@@ -971,9 +998,6 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& 
 
         if(bRetFound == true)
             break;
-
-        // no free. just mark it as free.
-        allocator.ResetAllArena();
     }
 
 
@@ -1007,10 +1031,10 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& 
 
     assertion(vecInst.size() == vecDasmInst.size() && "Decoded & Disasembled instruction count doens't match.");
     // qValidInstAdrs holds memory addresses of consecutive instrutions. when we disassemble from first
-    // entry to last entry we get one less instruction than entries, because :
+    // entry of qValidInstAdrs to the last entry we get one less instruction than the total entries in qValidInstAdrs, because :
     // 0, 1, 2, 3, 4, 5         Total 6
     // 0-1, 1-2, 2-3, 3-4, 4-5, Total 5
-    // i.e. no bytes for last instruction according in qValidInstAdrs.
+    // i.e. no bytes for last instruction pointer in qValidInstAdrs although the inst. is valid.
     assertion(qValidInstAdrs.size() - 1 == vecDasmInst.size() && "Valid instruction addresses don't line up with disassembled inst count.");
 
 
@@ -1028,30 +1052,45 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& 
         return 0;
 
 
-    // second last instruction, right above RETN instruction.
-    InsaneDASM64::Instruction_t* pMagicInst = &vecInst[vecInst.size() - 2];
+    bool bStackFrameOmitted = true;
+    for(int iInstOffset = 0; iInstOffset < 3; iInstOffset++)
+    {
+        // This will iterate over index size - 2, size - 3, size - 4.
+        // i.e. second last, before second last, and before before second last.
+        int iInstIndex = static_cast<int>(vecInst.size()) - 2 - iInstOffset;
 
-    // Must only have Legacy encoded instructions in stack frame epilogue. 
-    if(pMagicInst->m_iInstEncodingType != InsaneDASM64::Instruction_t::InstEncodingType_Legacy)
-        return 0;
+        if(iInstIndex < 0)
+            break;
+
+        InsaneDASM64::Instruction_t* pMagicInst = &vecInst[iInstIndex];
+
+        // Must only have Legacy encoded instructions in stack frame epilogue. 
+        if(pMagicInst->m_iInstEncodingType != InsaneDASM64::Instruction_t::InstEncodingType_Legacy)
+            return 0;
 
 
-    InsaneDASM64::Legacy::LegacyInst_t* pSecondLastInst = 
-        reinterpret_cast<InsaneDASM64::Legacy::LegacyInst_t*>(pMagicInst->m_pInst);
+        InsaneDASM64::Legacy::LegacyInst_t* pSecondLastInst = 
+            reinterpret_cast<InsaneDASM64::Legacy::LegacyInst_t*>(pMagicInst->m_pInst);
 
-    // If this instrucion is "LEAVE" or "POP rbp", then stack frame is not omitted.
-    int  iInstLength = pSecondLastInst->GetInstLengthInBytes();
-    bool bLeaveInst  = iInstLength == 1 && pSecondLastInst->m_opCode.GetMostSignificantOpCode() == 0xC9; // "LEAVE" inst
-    bool bPopRBP     = iInstLength == 1 && pSecondLastInst->m_opCode.GetMostSignificantOpCode() == 0x5D; // "POP rbp" inst
-    bool bStackFrameOmitted = bLeaveInst == false && bPopRBP == false;
+        // If this instrucion is "LEAVE" or "POP rbp", then stack frame is not omitted.
+        int  iInstLength = pSecondLastInst->GetInstLengthInBytes();
+        bool bLeaveInst  = iInstLength == 1 && pSecondLastInst->m_opCode.GetMostSignificantOpCode() == 0xC9; // "LEAVE" inst
+        bool bPopRBP     = iInstLength == 1 && pSecondLastInst->m_opCode.GetMostSignificantOpCode() == 0x5D; // "POP rbp" inst
+
+        if(bLeaveInst == true || bPopRBP == true)
+        {
+            bStackFrameOmitted = false;
+            break;
+        }
+    }
 
 
     if(bStackFrameOmitted == false)
     {
-        WIN_LOG("This function has a stack frame.");
+        WIN_LOG("This function has a normal stack frame.");
 
         // At rBP is the pushed rBP (from stack frame prologue.). Next to that is the return adrs.
-        uintptr_t pReturnAdrs = static_cast<uintptr_t>(g_pContext->uc_mcontext.gregs[REG_RBP]) + 8;
+        uintptr_t pReturnAdrs = static_cast<uintptr_t>(iStackFrame.m_rBP) + 8;
         if(g_memRegionHandler.HasParentRegion(pReturnAdrs) == false)
             return 0;
 
@@ -1059,7 +1098,29 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& 
         if(g_memRegionHandler.HasParentRegion(iReturnAdrs) == false)
             return 0;
 
+        // Modifying stack frame before leaving.
+        {
+            uintptr_t iOldRBP = *reinterpret_cast<uintptr_t*>(static_cast<uintptr_t>(iStackFrame.m_rBP));
+            if(g_memRegionHandler.HasParentRegion(iOldRBP) == true)
+            {
+                iStackFrame.m_rSP = iStackFrame.m_rBP + 0x10;
+                iStackFrame.m_rBP = static_cast<greg_t>(iOldRBP);
+            }
+        }
+
         return iReturnAdrs;
+    }
+
+    for(int i = 0; i < vecDasmInst.size(); i++)
+    {
+        printf("%p  ", reinterpret_cast<void*>(qValidInstAdrs[i]));
+
+
+        InsaneDASM64::DASMInst_t& inst = vecDasmInst[i];
+        printf("%s ", inst.m_szMnemonic);
+        for(int i = 0; i < inst.m_nOperands; i++)
+            printf("%s, ", inst.m_szOperands[i]);
+        printf("\n");
     }
 
 
@@ -1073,14 +1134,14 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& 
     {
         InsaneDASM64::DASMInst_t*    pDasmInst = &vecDasmInst[iInstIndex];
         InsaneDASM64::Instruction_t* pInst     = &vecInst[iInstIndex];
-        uintptr_t                    iInstAdrs = qValidInstAdrs[iInstIndex - 1]; // -1 cause @ last index is adrs of inst next to RETN.
+        uintptr_t                    iInstAdrs = qValidInstAdrs[iInstIndex];
 
         // Break @ first rSP modifying instruction.
         if(pInst->m_iInstEncodingType == InsaneDASM64::Instruction_t::InstEncodingType_Legacy)
         {
             if(pDasmInst->m_nOperands >= 1 && CaseInsensitiveStringMatch(pDasmInst->m_szOperands[0], "rsp") == true)
             {
-                WIN_LOG("Found rsp modifying instruction. @ %p", iInstAdrs);
+                WIN_LOG("This function has a omitted stack frame. Found rsp modifying instruction. @ %p", iInstAdrs);
                 LOG("%s %s, %s", pDasmInst->m_szMnemonic, pDasmInst->m_szOperands[0], pDasmInst->m_szOperands[1]);
 
                 pStackRestoringInst     = reinterpret_cast<InsaneDASM64::Legacy::LegacyInst_t*>(pInst->m_pInst);
@@ -1095,14 +1156,18 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& 
     // This function must be a leaf function, hence rsp is unchanged.
     if(pStackRestoringInst == nullptr)
     {
+        WIN_LOG("This function is a leaf funtion, rSP is constant in this fuction");
+
         // Push Pop can still occur in leaf fns?
-        uintptr_t pReturnAdrs = static_cast<uintptr_t>(g_pContext->uc_mcontext.gregs[REG_RSP] + iPushPopOffset); 
+        uintptr_t pReturnAdrs = static_cast<uintptr_t>(iStackFrame.m_rSP + iPushPopOffset); 
         if(g_memRegionHandler.HasParentRegion(pReturnAdrs) == false)
             return 0;
 
         uintptr_t iReturnAdrs = *reinterpret_cast<uintptr_t*>(pReturnAdrs);
         if(g_memRegionHandler.HasParentRegion(iReturnAdrs) == false)
             return 0;
+        
+        // NOTE : No need to modify stack frame here.
 
         return iReturnAdrs;
     }
@@ -1122,13 +1187,19 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& 
         if(g_memRegionHandler.HasParentRegion(pReturnAdrs) == false) // Failed to get return address. 
             return 0;
 
+
+        iStackFrame.m_rSP = pReturnAdrs + 8;
+
+
+        // NOTE: That since this is an omitted stack frame, there is no "push rbp" hence the rsp value
+        // that the LEA inst sets, should point to the return adrs.
         uintptr_t iReturnAdrs = *reinterpret_cast<uintptr_t*>(pReturnAdrs);
         if(g_memRegionHandler.HasParentRegion(iReturnAdrs) == false) // We got something, but it seems to be invalid.
             return 0;
 
         return iReturnAdrs;
     }
-    else if(CaseInsensitiveStringMatch(pSecondLastInst->m_opCode.m_pOpCodeDesc->m_szName, "ADD") == true)
+    else if(CaseInsensitiveStringMatch(pStackRestoringInst->m_opCode.m_pOpCodeDesc->m_szName, "ADD") == true)
     {
         // just for ease of writting.
         InsaneDASM64::Legacy::LegacyInst_t* pInst = pStackRestoringInst;
@@ -1174,9 +1245,11 @@ static uintptr_t DeadStop::GetReturnAdrs(uintptr_t iStartPos, ArenaAllocator_t& 
         }
 
 
-        uintptr_t pReturnAdrs = g_pContext->uc_mcontext.gregs[REG_RSP] + iRSPOffset + iPushPopOffset;
+        uintptr_t pReturnAdrs = iStackFrame.m_rSP + iRSPOffset + iPushPopOffset;
         if(g_memRegionHandler.HasParentRegion(pReturnAdrs) == false) // Failed to get return address. 
             return 0;
+
+        iStackFrame.m_rSP = pReturnAdrs + 8;
 
         uintptr_t iReturnAdrs = *reinterpret_cast<uintptr_t*>(pReturnAdrs);
         if(g_memRegionHandler.HasParentRegion(iReturnAdrs) == false) // We got something, but it seems to be invalid.
