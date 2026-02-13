@@ -9,7 +9,7 @@
 void BadFunction(std::vector<int>& vecInput)
 {
     std::cout << "this is a helpfull string\n";
-    printf("niga1, niga2, niga4, niga3");
+    printf("This is another helpful string.");
     vecInput[10] = 10;
 }
 

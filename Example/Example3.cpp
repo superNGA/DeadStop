@@ -1,22 +1,19 @@
 #include <iostream>
+#include <assert.h>
 #include "../Include/DeadStop.h"
 
 
 
-// A bad funtion that will crash...
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
 static void BadFunction()
 {
-    const char* szStringMaxPro = "Notfying user that we have reached this function.";
-    printf("%s\n", szStringMaxPro);
+    // assert(false && "This is a random assertion which won't ever trigger.");
+    // printf("We passed the assertion\n.");
+    std::cout << "We passed the assertion\n.";
 
     int* pA = reinterpret_cast<int*>(0xCDCDCDCDCDCDCDCD);
     *pA = 500;
-
-    int a = 10;
-    int b = 10020;
-    if(a + b == 2)
-        return;
-    return;
 }
 
 
@@ -25,7 +22,7 @@ static void BadFunction()
 ///////////////////////////////////////////////////////////////////////////
 int main(void)
 {
-    if(DeadStop::Initialize("testdump.txt", 50, 50, 2) != DeadStop::ErrCode_Success)
+    if(DeadStop::Initialize("testdump.txt", 50, 50, 8) != DeadStop::ErrCode_Success)
     {
         std::cout << "Failed to initialize DeadStop.\n";
         return 1;

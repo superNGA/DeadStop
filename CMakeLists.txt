@@ -51,3 +51,7 @@ target_link_libraries(DeadStopExample1 PRIVATE ${PROJECT_NAME})
 add_executable(DeadStopExample2 ${CMAKE_CURRENT_SOURCE_DIR}/Example/Example2.cpp)
 target_link_libraries(DeadStopExample2 PRIVATE ${PROJECT_NAME})
 target_compile_options(DeadStopExample2 PRIVATE $<$<CXX_COMPILER_ID:GNU>:-fomit-frame-pointer>)
+
+# Example 3.
+add_executable(DeadStopExample3 ${CMAKE_CURRENT_SOURCE_DIR}/Example/Example3.cpp)
+target_link_libraries(DeadStopExample3 PRIVATE ${PROJECT_NAME})
