@@ -20,14 +20,19 @@ enum ErrCodes_t
 };
 
 
-ErrCodes_t InitializeEx(
+/* Initialize DeadStop and allow fine tunning settings. */
+ErrCodes_t DeadStop_InitializeEx(
         const char* szDumpFilePath,
         int iAsmDumpRangeInBytes,
         int iStringDumpSize,
         int iCallStackDepth,
         int iSignatureSize);
 
-ErrCodes_t Initialize(const char* szDumpFilePath);
+/* Initialize DeadStop with default settings. */
+ErrCodes_t DeadStop_Initialize(const char* szDumpFilePath);
 
-ErrCodes_t Uninitialize();
-const char* GetErrorMessage(ErrCodes_t iErrCode);
+/* Uninitialize DeadStop. */
+ErrCodes_t DeadStop_Uninitialize();
+
+/* Get string message for given ErrCode_t. */
+const char* DeadStop_GetErrorMessage(ErrCodes_t iErrCode);

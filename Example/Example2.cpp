@@ -26,7 +26,7 @@ void FnThatCallsBadFunction(std::vector<int>& vecInput)
 ///////////////////////////////////////////////////////////////////////////
 int main(void)
 {
-    if(DeadStop::Initialize("testdump.txt", 50, 50, 5) != DeadStop::ErrCode_Success)
+    if(DeadStop_InitializeEx("testdump.txt", 50, 50, 5, 10) != ErrCode_Success)
     {
         std::cout << "Failed to initialize DeadStop.\n";
         return 1;
@@ -39,7 +39,7 @@ int main(void)
     FnThatCallsBadFunction(vecNums);
 
 
-    DeadStop::Uninitialize();
+    DeadStop_Uninitialize();
     std::cout << "Deadstop uninitialized.\n";
     return 0;
 }

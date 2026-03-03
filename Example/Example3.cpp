@@ -22,7 +22,7 @@ static void BadFunction()
 ///////////////////////////////////////////////////////////////////////////
 int main(void)
 {
-    if(DeadStop::Initialize("testdump.txt", 50, 50, 8) != DeadStop::ErrCode_Success)
+    if(DeadStop_InitializeEx("testdump.txt", 50, 50, 8, 10) != ErrCode_Success)
     {
         std::cout << "Failed to initialize DeadStop.\n";
         return 1;
@@ -34,7 +34,7 @@ int main(void)
     BadFunction();
 
 
-    DeadStop::Uninitialize();
+    DeadStop_Uninitialize();
     std::cout << "Deadstop uninitialized.\n";
     return 0;
 }
