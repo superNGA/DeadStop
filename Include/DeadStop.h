@@ -9,7 +9,7 @@
 #pragma once
 
 
-enum ErrCodes_t
+typedef enum ErrCodes_t
 {
     ErrCode_Invalid = -1,
     ErrCode_Success = 0,
@@ -17,7 +17,7 @@ enum ErrCodes_t
     ErrCode_FailedToStartSubModules,
 
     ErrCode_Count
-};
+} ErrCodes_t;
 
 
 /* Initialize DeadStop and allow fine tunning settings. */
