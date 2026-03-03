@@ -7,29 +7,27 @@
 // purpose : Log crashes with useful information.
 //-------------------------------------------------------------------------
 #pragma once
-#include "Alias.h"
 
 
-namespace DEADSTOP_NAMESPACE
+enum ErrCodes_t
 {
-    enum ErrCodes_t
-    {
-        ErrCode_Invalid = -1,
-        ErrCode_Success = 0,
-        ErrCode_FailedInit,
-        ErrCode_FailedToStartSubModules,
+    ErrCode_Invalid = -1,
+    ErrCode_Success = 0,
+    ErrCode_FailedInit,
+    ErrCode_FailedToStartSubModules,
 
-        ErrCode_Count
-    };
+    ErrCode_Count
+};
 
 
-    ErrCodes_t Initialize(
-            const char* szDumpFilePath,
-            int iAsmDumpRangeInBytes = 50,
-            int iStringDumpSize      = 10,
-            int iCallStackDepth      = 3,
-            int iSignatureSize       = 15);
+ErrCodes_t InitializeEx(
+        const char* szDumpFilePath,
+        int iAsmDumpRangeInBytes,
+        int iStringDumpSize,
+        int iCallStackDepth,
+        int iSignatureSize);
 
-    ErrCodes_t Uninitialize();
-    const char* GetErrorMessage(ErrCodes_t iErrCode);
-}
+ErrCodes_t Initialize(const char* szDumpFilePath);
+
+ErrCodes_t Uninitialize();
+const char* GetErrorMessage(ErrCodes_t iErrCode);

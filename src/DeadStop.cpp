@@ -17,15 +17,22 @@ using namespace DeadStop;
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
-ErrCodes_t DeadStop::Initialize(const char* szDumpFilePath, int iAsmDumpRangeInBytes, int iStringDumpSize, int iCallStackDepth, int iSignatureSize)
+ErrCodes_t InitializeEx(const char* szDumpFilePath, int iAsmDumpRangeInBytes, int iStringDumpSize, int iCallStackDepth, int iSignatureSize)
 {
     return DeadStop_t::GetInstance().Initialize(szDumpFilePath, iAsmDumpRangeInBytes, iStringDumpSize, iCallStackDepth, iSignatureSize);
+}
+
+///////////////////////////////////////////////////////////////////////////
+///////////////////////////////////////////////////////////////////////////
+ErrCodes_t Initialize(const char* szDumpFilePath)
+{
+    return DeadStop_t::GetInstance().Initialize(szDumpFilePath, 50, 10, 3, 15);
 }
 
 
 ///////////////////////////////////////////////////////////////////////////
 ///////////////////////////////////////////////////////////////////////////
-ErrCodes_t DeadStop::Uninitialize()
+ErrCodes_t Uninitialize()
 {
     return DeadStop_t::GetInstance().Uninitialize();
 }
